@@ -29,16 +29,13 @@ from queue import Queue, Empty
 try:
     import websockets
     import websockets.exceptions
-except ImportError:
-    os.system(f"{sys.executable} -m pip install websockets --break-system-packages -q")
-    import websockets
-    import websockets.exceptions
+except ImportError as e:
+    raise SystemExit("Missing dependency: websockets. Run: pip install -r requirements.txt") from e
 
 try:
     import aiohttp
-except ImportError:
-    os.system(f"{sys.executable} -m pip install aiohttp --break-system-packages -q")
-    import aiohttp
+except ImportError as e:
+    raise SystemExit("Missing dependency: aiohttp. Run: pip install -r requirements.txt") from e
 
 # ═══════════════════════════════════════════
 # Constants
@@ -72,6 +69,9 @@ def log(msg,c=C.WHT,i=""):
     print(f"{C.D}[{ts()}]{C.R} {f'{i} ' if i else ''}{c}{msg}{C.R}",flush=True)
 
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
 def load_dotenv(path):
     if not path or not os.path.exists(path):
         return
@@ -92,6 +92,10 @@ def load_dotenv(path):
                     os.environ[key] = value
     except Exception:
         pass
+
+
+def resolve_manual_token(cli_token=None):
+    return (cli_token or os.getenv("JAY_MINING_TOKEN") or os.getenv("JAY_WS_TOKEN") or os.getenv("JAY_TOKEN") or "").strip()
 
 
 def banner():
@@ -235,7 +239,7 @@ class ManualTokenManager:
 
     def get_token(self, timeout=60):
         if not self.token:
-            raise Exception("Manual token is empty")
+            raise Exception("Manual token missing. Put JAY_MINING_TOKEN in .env or pass --token.")
         return self.token
 
     def stop(self):
@@ -538,7 +542,8 @@ class JayMiner:
 
 
 def main():
-    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+    load_dotenv(os.path.join(SCRIPT_DIR, ".env"))
+    load_dotenv(os.path.join(os.getcwd(), ".env"))
 
     p = argparse.ArgumentParser(description="JAY Network CLI Miner",epilog="Pool: wss://api-pool.winnode.xyz")
     p.add_argument("--wallet","-w",required=True,help="JAY wallet (yjay1...)")
@@ -551,7 +556,7 @@ def main():
     if not args.wallet.startswith("yjay"):
         print(f"{C.RED}Invalid wallet address{C.R}"); sys.exit(1)
     
-    manual_token = args.token or os.getenv("JAY_MINING_TOKEN") or os.getenv("JAY_WS_TOKEN") or os.getenv("JAY_TOKEN")
+    manual_token = resolve_manual_token(args.token)
     miner = JayMiner(args.wallet, max(1,min(args.threads,32)), args.verbose, token=manual_token)
     
     if args.info:

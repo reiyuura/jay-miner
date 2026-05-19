@@ -1,134 +1,115 @@
 # JAY Network CLI Miner ⛏️
 
-CLI mining client for **The Jay Network** blockchain (Cosmos SDK), reverse-engineered from the official web miner at `mining.thejaynetwork.com`.
+A simple CLI miner for **The Jay Network** that supports:
 
-## Prerequisites
+- **Public/manual mode**: you supply the WebSocket token in `.env`
+- **Private/auto mode**: optional Camoufox browser session refreshes the token automatically
+
+## Features
+
+- Connects to the JAY pool over WebSocket
+- Supports wallet balance checks
+- Manual token mode for public release
+- Optional auto token refresh for private usage
+- Reconnect handling and periodic status updates
+
+## Requirements
 
 ```bash
-# Core deps for manual mode
-pip install websockets aiohttp --break-system-packages
+# Base dependencies for manual/public mode
+pip install -r requirements.txt
 
 # Optional: only needed for auto token refresh mode
 pip install camoufox --break-system-packages
-# Camoufox also needs Xvfb for headless rendering:
+
+# Camoufox headless mode also needs Xvfb on Linux
 apt install xvfb
+```
+
+## Quick Start
+
+1. Copy the example env file:
+
+```bash
+cp .env.example .env
+```
+
+2. Edit `.env` and set your browser token:
+
+```bash
+JAY_MINING_TOKEN=your_ws_token_here
+```
+
+3. Run the miner:
+
+```bash
+python3 jay-miner.py --wallet yjay1abc...xyz
 ```
 
 ## Usage
 
 ```bash
-# Check wallet info
+# Show wallet balance only
 python3 jay-miner.py --wallet yjay1abc...xyz --info
 
-# Start mining (default 4 threads)
+# Start mining with default 4 threads
 python3 jay-miner.py --wallet yjay1abc...xyz
 
-# Custom threads
+# Use more threads
 python3 jay-miner.py --wallet yjay1abc...xyz --threads 8
 
-# Verbose mode
-python3 jay-miner.py --wallet yjay1abc...xyz --threads 4 --verbose
-
-# Manual token mode (via .env)
-python3 jay-miner.py --wallet yjay1abc...xyz
+# Verbose logs
+python3 jay-miner.py --wallet yjay1abc...xyz --verbose
 ```
 
-## How It Works
+## How to get the token manually
 
-1. **Token Acquisition**: Uses Camoufox (anti-fingerprinting Firefox) to obtain a WebSocket authentication token from the mining site's `/api/ws-token` endpoint.
-
-2. **WebSocket Connection**: Connects to `wss://api-pool.winnode.xyz` with the token.
-
-3. **Mining Loop**: Sends `start_mining` with wallet address, then periodically submits shares (`submit_share`) with nonce + hash.
-
-4. **Rewards**: The pool accepts shares and periodically distributes JAY rewards.
-
-## Manual Browser Token Flow
-
-If you want to do the token step yourself in a normal browser instead of letting Camoufox handle it:
+If you want to obtain the token yourself instead of using Camoufox:
 
 1. Open `https://mining.thejaynetwork.com` in Chrome or Firefox.
 2. Complete the site verification / checkpoint if it appears.
 3. Wait until the `JAY Mining` page fully loads.
 4. Open DevTools → **Network** and refresh the page.
-5. Look for the `POST /api/ws-token` request.
-6. Open that request and copy the `token` value from the JSON response.
-7. Put the token into a `.env` file next to `jay-miner.py`:
+5. Find the `POST /api/ws-token` request.
+6. Open it and copy the `token` value from the JSON response.
+7. Paste that token into `.env` as `JAY_MINING_TOKEN=...`.
+8. Run the miner normally.
 
-   ```bash
-   JAY_MINING_TOKEN=your_ws_token_here
-   ```
+That token is used to connect to `wss://api-pool.winnode.xyz`.
 
-8. Run the miner normally:
+## Private auto mode
 
-   ```bash
-   python3 jay-miner.py --wallet yjay1abc...xyz
-   ```
+If you want the miner to refresh the token automatically, install `camoufox` and `xvfb`, then run the script without setting `JAY_MINING_TOKEN`.
 
-That token is what the miner uses to connect to `wss://api-pool.winnode.xyz`. The current CLI miner can fetch it automatically, but this manual flow is useful for debugging or for public sharing.
+This mode is intended for private use. The public release flow is `.env`-based manual token mode.
 
-For public sharing, use `.env` mode. Keep the Camoufox auto-refresh mode for your private setup only.
+## Environment Variables
 
-## Architecture
+- `JAY_MINING_TOKEN` — WebSocket token copied from `/api/ws-token`
+- `JAY_WS_TOKEN` — alternate token name
+- `JAY_TOKEN` — alternate token name
 
-```
-┌──────────────┐     Token     ┌──────────────────┐
-│  Camoufox    │ ──────────── │  mining.thejaynetwork  │
-│  (Xvfb)     │              │  /api/ws-token        │
-└──────┬───────┘              └──────────────────┘
-       │ token
-       ▼
-┌──────────────┐   WebSocket   ┌──────────────────┐
-│  CLI Miner   │ ──────────── │  api-pool.winnode.xyz │
-│  (Python)    │              │  Mining Pool          │
-└──────┬───────┘              └──────────────────┘
-       │ balance query
-       ▼
-┌──────────────┐
-│ api-jayn.winnode.xyz │
-│ Chain LCD API        │
-└──────────────┘
-```
+## Endpoints
 
-## Key Endpoints
-
-- **Pool WebSocket**: `wss://api-pool.winnode.xyz`
-- **Pool API**: `https://api-pool.winnode.xyz`
-- **Chain LCD**: `https://api-jayn.winnode.xyz`
-- **Mining Site**: `https://mining.thejaynetwork.com`
-- **RPC**: `https://rpc-jayn.winnode.xyz`
+- Pool WebSocket: `wss://api-pool.winnode.xyz`
+- Pool API: `https://api-pool.winnode.xyz`
+- Chain LCD: `https://api-jayn.winnode.xyz`
+- Mining site: `https://mining.thejaynetwork.com`
+- RPC: `https://rpc-jayn.winnode.xyz`
 
 ## Chain Info
 
-- **Chain ID**: `thejaynetwork`
-- **Prefix**: `yjay`
-- **Denom**: `ujay` (1 JAY = 1,000,000 ujay)
-- **Coin Type**: 118 (BIP44)
-- **Block Time**: ~5 seconds
-
-## WebSocket Protocol
-
-### Client → Server
-- `start_mining` — Start mining with wallet + threads config
-- `submit_share` — Submit a share (nonce, hash, jobId, difficulty)
-- `stop_mining` — Stop mining session
-- `ping` — Keepalive
-- `status` — Update miner status (online/away/offline)
-
-### Server → Client
-- `job` / `new_work` — New mining job (jobId, target)
-- `auth_success` / `mining_started` — Mining confirmed (minerId)
-- `share_accepted` — Share accepted ✓
-- `share_rejected` — Share rejected ✗
-- `mining_reward` — Reward received (amount, shares, txHash)
-- `block_found` — Block found!
-- `payout` — Payout sent
-- `pool_stats` — Pool statistics
-- `pong` — Keepalive response
+- Chain ID: `thejaynetwork`
+- Prefix: `yjay`
+- Denom: `ujay` (`1 JAY = 1,000,000 ujay`)
+- Coin type: `118`
 
 ## Notes
 
-- Token expires every 60 seconds; the miner auto-refreshes via persistent Camoufox session
-- Camoufox is needed because `mining.thejaynetwork.com` is behind Vercel Security Checkpoint (blocks all HTTP clients and headless browsers)
-- Shares are simulated (matching the web miner's behavior — not actual PoW)
-- Pool fee: 1.5%
+- Tokens expire periodically, so keep `.env` updated if you use manual mode
+- The CLI reconnects automatically when needed
+- Manual/public mode does not require Camoufox
+
+## License
+
+MIT
