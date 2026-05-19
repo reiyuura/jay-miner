@@ -71,6 +71,29 @@ def ts(): return datetime.now().strftime("%H:%M:%S")
 def log(msg,c=C.WHT,i=""):
     print(f"{C.D}[{ts()}]{C.R} {f'{i} ' if i else ''}{c}{msg}{C.R}",flush=True)
 
+
+def load_dotenv(path):
+    if not path or not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:].strip()
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception:
+        pass
+
+
 def banner():
     print(f"""
 {C.CYN}{C.B}╔════════════════════════════════════════════╗
@@ -515,18 +538,21 @@ class JayMiner:
 
 
 def main():
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
     p = argparse.ArgumentParser(description="JAY Network CLI Miner",epilog="Pool: wss://api-pool.winnode.xyz")
     p.add_argument("--wallet","-w",required=True,help="JAY wallet (yjay1...)")
     p.add_argument("--threads","-t",type=int,default=DEFAULT_THREADS,help=f"Threads (default:{DEFAULT_THREADS})")
     p.add_argument("--verbose","-v",action="store_true")
-    p.add_argument("--token",help="Manual websocket token from /api/ws-token (skips Camoufox)")
+    p.add_argument("--token",help="Manual websocket token from /api/ws-token (or JAY_MINING_TOKEN in .env; skips Camoufox)")
     p.add_argument("--info","-i",action="store_true",help="Show info and exit")
     args = p.parse_args()
     
     if not args.wallet.startswith("yjay"):
         print(f"{C.RED}Invalid wallet address{C.R}"); sys.exit(1)
     
-    miner = JayMiner(args.wallet, max(1,min(args.threads,32)), args.verbose, token=args.token)
+    manual_token = args.token or os.getenv("JAY_MINING_TOKEN") or os.getenv("JAY_WS_TOKEN") or os.getenv("JAY_TOKEN")
+    miner = JayMiner(args.wallet, max(1,min(args.threads,32)), args.verbose, token=manual_token)
     
     if args.info:
         async def info():

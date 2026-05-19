@@ -29,8 +29,8 @@ python3 jay-miner.py --wallet yjay1abc...xyz --threads 8
 # Verbose mode
 python3 jay-miner.py --wallet yjay1abc...xyz --threads 4 --verbose
 
-# Manual token mode (no Camoufox)
-python3 jay-miner.py --wallet yjay1abc...xyz --token <ws-token>
+# Manual token mode (via .env)
+python3 jay-miner.py --wallet yjay1abc...xyz
 ```
 
 ## How It Works
@@ -53,10 +53,21 @@ If you want to do the token step yourself in a normal browser instead of letting
 4. Open DevTools → **Network** and refresh the page.
 5. Look for the `POST /api/ws-token` request.
 6. Open that request and copy the `token` value from the JSON response.
+7. Put the token into a `.env` file next to `jay-miner.py`:
 
-That token is what the miner uses to connect to `wss://api-pool.winnode.xyz`. The current CLI miner fetches it automatically, but this manual flow is useful for debugging or for custom clients.
+   ```bash
+   JAY_MINING_TOKEN=your_ws_token_here
+   ```
 
-For public sharing, use `--token` mode. Keep the Camoufox auto-refresh mode for your private setup only.
+8. Run the miner normally:
+
+   ```bash
+   python3 jay-miner.py --wallet yjay1abc...xyz
+   ```
+
+That token is what the miner uses to connect to `wss://api-pool.winnode.xyz`. The current CLI miner can fetch it automatically, but this manual flow is useful for debugging or for public sharing.
+
+For public sharing, use `.env` mode. Keep the Camoufox auto-refresh mode for your private setup only.
 
 ## Architecture
 
