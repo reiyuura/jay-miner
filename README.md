@@ -5,7 +5,11 @@ CLI mining client for **The Jay Network** blockchain (Cosmos SDK), reverse-engin
 ## Prerequisites
 
 ```bash
-pip install websockets aiohttp camoufox --break-system-packages
+# Core deps for manual mode
+pip install websockets aiohttp --break-system-packages
+
+# Optional: only needed for auto token refresh mode
+pip install camoufox --break-system-packages
 # Camoufox also needs Xvfb for headless rendering:
 apt install xvfb
 ```
@@ -24,6 +28,9 @@ python3 jay-miner.py --wallet yjay1abc...xyz --threads 8
 
 # Verbose mode
 python3 jay-miner.py --wallet yjay1abc...xyz --threads 4 --verbose
+
+# Manual token mode (no Camoufox)
+python3 jay-miner.py --wallet yjay1abc...xyz --token <ws-token>
 ```
 
 ## How It Works
@@ -48,6 +55,8 @@ If you want to do the token step yourself in a normal browser instead of letting
 6. Open that request and copy the `token` value from the JSON response.
 
 That token is what the miner uses to connect to `wss://api-pool.winnode.xyz`. The current CLI miner fetches it automatically, but this manual flow is useful for debugging or for custom clients.
+
+For public sharing, use `--token` mode. Keep the Camoufox auto-refresh mode for your private setup only.
 
 ## Architecture
 

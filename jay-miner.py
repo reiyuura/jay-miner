@@ -2,7 +2,7 @@
 """
 JAY Network CLI Miner v2
 ========================
-CLI miner for The Jay Network with persistent Camoufox token management.
+CLI mining client for The Jay Network with optional Camoufox token management.
 
 Usage:
     python3 jay-miner.py --wallet yjay1abc...xyz
@@ -201,14 +201,33 @@ class TokenManager:
             self._xvfb.terminate()
 
 
+class ManualTokenManager:
+    """Simple token provider for manual/browser-supplied tokens."""
+
+    def __init__(self, token: str):
+        self.token = (token or "").strip()
+
+    def start(self):
+        return None
+
+    def get_token(self, timeout=60):
+        if not self.token:
+            raise Exception("Manual token is empty")
+        return self.token
+
+    def stop(self):
+        return None
+
+
 # ═══════════════════════════════════════════
 # Miner
 # ═══════════════════════════════════════════
 class JayMiner:
-    def __init__(self, wallet, threads=DEFAULT_THREADS, verbose=False):
+    def __init__(self, wallet, threads=DEFAULT_THREADS, verbose=False, token=None):
         self.wallet = wallet
         self.threads = threads
         self.verbose = verbose
+        self.manual_token = token.strip() if token else None
         self.session_id = gen_id("session_")
         self.device_id = gen_id("device_")
         self.miner_id = None
@@ -226,7 +245,7 @@ class JayMiner:
         self._stop = False
         self._reconnects = 0
         self._ban_until = 0
-        self.token_mgr = TokenManager()
+        self.token_mgr = ManualTokenManager(self.manual_token) if self.manual_token else TokenManager()
 
     async def get_balance(self):
         try:
@@ -386,8 +405,11 @@ class JayMiner:
         log(f"Balance: {self.balance:.6f} JAY",C.CYN,"💰")
         
         print()
-        log("Starting persistent Camoufox browser...",C.YEL,"🌐")
-        self.token_mgr.start()
+        if self.manual_token:
+            log("Using manual browser token mode",C.YEL,"🖐")
+        else:
+            log("Starting persistent Camoufox browser...",C.YEL,"🌐")
+            self.token_mgr.start()
         
         log("Starting mining...",C.YEL,"⛏")
         
@@ -497,13 +519,14 @@ def main():
     p.add_argument("--wallet","-w",required=True,help="JAY wallet (yjay1...)")
     p.add_argument("--threads","-t",type=int,default=DEFAULT_THREADS,help=f"Threads (default:{DEFAULT_THREADS})")
     p.add_argument("--verbose","-v",action="store_true")
+    p.add_argument("--token",help="Manual websocket token from /api/ws-token (skips Camoufox)")
     p.add_argument("--info","-i",action="store_true",help="Show info and exit")
     args = p.parse_args()
     
     if not args.wallet.startswith("yjay"):
         print(f"{C.RED}Invalid wallet address{C.R}"); sys.exit(1)
     
-    miner = JayMiner(args.wallet, max(1,min(args.threads,32)), args.verbose)
+    miner = JayMiner(args.wallet, max(1,min(args.threads,32)), args.verbose, token=args.token)
     
     if args.info:
         async def info():
