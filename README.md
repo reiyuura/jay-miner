@@ -28,13 +28,26 @@ python3 jay-miner.py --wallet yjay1abc...xyz --threads 4 --verbose
 
 ## How It Works
 
-1. **Token Acquisition**: Uses Camoufox (anti-fingerprinting Firefox) to bypass Vercel's Security Checkpoint and obtain a WebSocket authentication token from the mining site's `/api/ws-token` endpoint.
+1. **Token Acquisition**: Uses Camoufox (anti-fingerprinting Firefox) to obtain a WebSocket authentication token from the mining site's `/api/ws-token` endpoint.
 
 2. **WebSocket Connection**: Connects to `wss://api-pool.winnode.xyz` with the token.
 
 3. **Mining Loop**: Sends `start_mining` with wallet address, then periodically submits shares (`submit_share`) with nonce + hash.
 
 4. **Rewards**: The pool accepts shares and periodically distributes JAY rewards.
+
+## Manual Browser Token Flow
+
+If you want to do the token step yourself in a normal browser instead of letting Camoufox handle it:
+
+1. Open `https://mining.thejaynetwork.com` in Chrome or Firefox.
+2. Complete the site verification / checkpoint if it appears.
+3. Wait until the `JAY Mining` page fully loads.
+4. Open DevTools → **Network** and refresh the page.
+5. Look for the `POST /api/ws-token` request.
+6. Open that request and copy the `token` value from the JSON response.
+
+That token is what the miner uses to connect to `wss://api-pool.winnode.xyz`. The current CLI miner fetches it automatically, but this manual flow is useful for debugging or for custom clients.
 
 ## Architecture
 
