@@ -53,6 +53,7 @@ MIN_SHARE_GAP    = 2.0    # hard floor: never send shares faster than this (pool
 PING_INTERVAL    = 30
 BALANCE_INTERVAL = 30
 TOKEN_LIFETIME   = 300  # token refresh cadence; avoid /api/ws-token 429 rate limits
+TOKEN_429_BACKOFF = 900  # /api/ws-token can rate-limit hard; do not retry aggressively
 MAX_RECONNECT    = 50
 RECONNECT_BASE   = 2.0
 INITIAL_DELAY    = 5.0    # wait after connect before first share
@@ -185,10 +186,20 @@ class TokenManager:
                                         method: "POST",
                                         headers: {"Content-Type": "application/json"}
                                     });
-                                    if (r.ok) return await r.json();
-                                    throw new Error("HTTP " + r.status);
+                                    const retryAfter = parseInt(r.headers.get("Retry-After") || "0", 10);
+                                    if (!r.ok) return {error: true, status: r.status, retryAfter};
+                                    return await r.json();
                                 }''')
-                                
+
+                                if result.get('error'):
+                                    status = result.get('status')
+                                    if status == 429:
+                                        wait_for = max(int(result.get('retryAfter') or 0), TOKEN_429_BACKOFF)
+                                        log(f"Token endpoint rate-limited (HTTP 429). Backing off {wait_for}s.", C.YEL, "⏳")
+                                        time.sleep(wait_for)
+                                        continue
+                                    raise Exception(f"HTTP {status}")
+
                                 token = result.get('token')
                                 if token:
                                     # Put token, replacing old one if not consumed
@@ -196,18 +207,18 @@ class TokenManager:
                                         try: self._token_queue.get_nowait()
                                         except: pass
                                     self._token_queue.put(token)
-                                
+
                                 time.sleep(TOKEN_LIFETIME)
-                                
+
                             except Exception as e:
                                 log(f"Token fetch error: {e}", C.RED, "⚠")
-                                # Page might have navigated away, reload
+                                # Page might have navigated away or lost session; reload only for non-rate-limit errors.
                                 try:
                                     page.goto(MINING_URL, wait_until='domcontentloaded', timeout=60000)
                                     page.wait_for_timeout(30000)
                                 except:
                                     break  # restart browser
-                                time.sleep(5)
+                                time.sleep(60)
                     else:
                         log(f"Mining site failed to load (got: {title})", C.RED, "❌")
                         time.sleep(10)
