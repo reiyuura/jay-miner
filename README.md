@@ -16,6 +16,7 @@ Private browser automation is still available as an optional fallback, but manua
 - Manual token mode via `.env` or `--token`
 - Wallet balance lookup via the JAY LCD API
 - Reconnect handling and periodic status output
+- Optional JAY Wallet browser payload flag (`isJayWalletBrowser=true`)
 - Optional private Camoufox token refresh mode
 
 ## Requirements
@@ -73,6 +74,9 @@ python3 jay-miner.py --wallet yjay1abc...xyz --verbose
 
 # Optional direct token override; .env is preferred
 python3 jay-miner.py --wallet yjay1abc...xyz --token your_ws_token_here
+
+# Optional JAY Wallet browser flag
+python3 jay-miner.py --wallet yjay1abc...xyz --jay-wallet-browser
 ```
 
 ## How to Get the Token Manually
@@ -124,6 +128,7 @@ Supported environment variables:
 - `JAY_MINING_TOKEN`: WebSocket token copied from `/api/ws-token`
 - `JAY_WS_TOKEN`: alternate token variable name
 - `JAY_TOKEN`: alternate token variable name
+- `JAY_WALLET_BROWSER`: set to `1`, `true`, `yes`, or `on` to send `isJayWalletBrowser=true`
 
 `.env` is loaded from both:
 
@@ -150,6 +155,7 @@ Supported environment variables:
 - Tokens can expire periodically; update `.env` if the pool rejects your token.
 - The CLI automatically reconnects on connection drops.
 - Manual mode does not require Camoufox or Xvfb.
+- The JAY Wallet browser flag only changes the `start_mining` payload. Any 2x reward eligibility is decided by the official pool/server, not by this CLI.
 - Do not commit `.env` or share your token publicly.
 
 ## Disclaimer

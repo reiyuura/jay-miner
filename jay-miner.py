@@ -45,7 +45,7 @@ POOL_WS_URL   = "wss://api-pool.winnode.xyz"
 POOL_API_URL  = "https://api-pool.winnode.xyz"
 CHAIN_API_URL = "https://api-jayn.winnode.xyz"
 MINING_URL    = "https://mining.thejaynetwork.com"
-VERSION       = "1.0.0"
+VERSION       = "1.1.0"
 
 DEFAULT_THREADS  = 4
 SHARE_INTERVAL   = 5.0    # seconds between share submissions (pool min=750ms, use generous gap)
@@ -98,6 +98,13 @@ def load_dotenv(path):
 
 def resolve_manual_token(cli_token=None):
     return (cli_token or os.getenv("JAY_MINING_TOKEN") or os.getenv("JAY_WS_TOKEN") or os.getenv("JAY_TOKEN") or "").strip()
+
+
+def parse_env_bool(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def banner():
@@ -252,11 +259,12 @@ class ManualTokenManager:
 # Miner
 # ═══════════════════════════════════════════
 class JayMiner:
-    def __init__(self, wallet, threads=DEFAULT_THREADS, verbose=False, token=None):
+    def __init__(self, wallet, threads=DEFAULT_THREADS, verbose=False, token=None, jay_wallet_browser=False):
         self.wallet = wallet
         self.threads = threads
         self.verbose = verbose
         self.manual_token = token.strip() if token else None
+        self.jay_wallet_browser = bool(jay_wallet_browser)
         self.session_id = gen_id("session_")
         self.device_id = gen_id("device_")
         self.miner_id = None
@@ -429,6 +437,8 @@ class JayMiner:
         banner()
         log(f"Wallet: {self.wallet}",C.CYN,"👛")
         log(f"Threads: {self.threads}",C.CYN,"🧵")
+        if self.jay_wallet_browser:
+            log("JAY Wallet browser flag: enabled",C.CYN,"🚀")
         
         await self.get_balance()
         log(f"Balance: {self.balance:.6f} JAY",C.CYN,"💰")
@@ -479,7 +489,8 @@ class JayMiner:
                     await self._send("start_mining",{
                         "wallet":self.wallet,"threads":self.threads,
                         "sessionId":self.session_id,"deviceId":self.device_id,
-                        "minerId":self.miner_id,"isJayWalletBrowser":False
+                        "minerId":self.miner_id,
+                        "isJayWalletBrowser":self.jay_wallet_browser
                     })
                     
                     tasks = [
@@ -552,6 +563,7 @@ def main():
     p.add_argument("--threads","-t",type=int,default=DEFAULT_THREADS,help=f"Threads (default:{DEFAULT_THREADS})")
     p.add_argument("--verbose","-v",action="store_true")
     p.add_argument("--token",help="Manual websocket token from /api/ws-token (or JAY_MINING_TOKEN in .env; skips Camoufox)")
+    p.add_argument("--jay-wallet-browser",action="store_true",help="Send isJayWalletBrowser=true in the pool start_mining payload; can also be enabled with JAY_WALLET_BROWSER=1")
     p.add_argument("--info","-i",action="store_true",help="Show info and exit")
     p.add_argument("--version",action="version",version=f"JAY Network CLI Miner {VERSION}")
     args = p.parse_args()
@@ -560,7 +572,14 @@ def main():
         print(f"{C.RED}Invalid wallet address{C.R}"); sys.exit(1)
     
     manual_token = resolve_manual_token(args.token)
-    miner = JayMiner(args.wallet, max(1,min(args.threads,32)), args.verbose, token=manual_token)
+    jay_wallet_browser = args.jay_wallet_browser or parse_env_bool("JAY_WALLET_BROWSER")
+    miner = JayMiner(
+        args.wallet,
+        max(1,min(args.threads,32)),
+        args.verbose,
+        token=manual_token,
+        jay_wallet_browser=jay_wallet_browser,
+    )
     
     if args.info:
         async def info():

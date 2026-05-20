@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## 1.1.0 - 2026-05-20
+
+### Added
+
+- Optional `--jay-wallet-browser` flag.
+- Optional `JAY_WALLET_BROWSER=1` environment config.
+- `start_mining` can now send `isJayWalletBrowser=true` for users running with an eligible official JAY Wallet browser session/token.
+
 ## 1.0.0 - 2026-05-20
 
 ### Added
