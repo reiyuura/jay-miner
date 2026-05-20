@@ -584,6 +584,7 @@ def main():
     p.add_argument("--threads","-t",type=int,default=DEFAULT_THREADS,help=f"Threads (default:{DEFAULT_THREADS})")
     p.add_argument("--verbose","-v",action="store_true")
     p.add_argument("--token",help="Manual websocket token from /api/ws-token (or JAY_MINING_TOKEN in .env; skips Camoufox)")
+    p.add_argument("--auto-token",action="store_true",help="Force Camoufox auto-token mode and ignore manual token env vars; can also be enabled with JAY_AUTO_TOKEN=1")
     p.add_argument("--jay-wallet-browser",action="store_true",help="Send isJayWalletBrowser=true in the pool start_mining payload; can also be enabled with JAY_WALLET_BROWSER=1")
     p.add_argument("--info","-i",action="store_true",help="Show info and exit")
     p.add_argument("--version",action="version",version=f"JAY Network CLI Miner {VERSION}")
@@ -592,7 +593,8 @@ def main():
     if not args.wallet.startswith("yjay"):
         print(f"{C.RED}Invalid wallet address{C.R}"); sys.exit(1)
     
-    manual_token = resolve_manual_token(args.token)
+    auto_token = args.auto_token or parse_env_bool("JAY_AUTO_TOKEN")
+    manual_token = "" if auto_token else resolve_manual_token(args.token)
     jay_wallet_browser = args.jay_wallet_browser or parse_env_bool("JAY_WALLET_BROWSER")
     miner = JayMiner(
         args.wallet,

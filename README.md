@@ -80,7 +80,7 @@ python3 jay-miner.py --wallet yjay1abc...xyz
 
 Replace `yjay1abc...xyz` with your real JAY wallet address.
 
-By default, if `JAY_MINING_TOKEN` / `--token` is not set, the miner uses Camoufox full-auto mode.
+By default, if `JAY_MINING_TOKEN` / `--token` is not set, the miner uses Camoufox full-auto mode. If a stale manual token exists in `.env`, use `--auto-token` or `JAY_AUTO_TOKEN=1` to force full-auto mode.
 
 ---
 
@@ -101,7 +101,7 @@ JAY_WALLET=yjay1abc...xyz
 JAY_THREADS=4
 ```
 
-Leave `JAY_MINING_TOKEN=` empty for full-auto mode.
+Leave `JAY_MINING_TOKEN=` empty for full-auto mode. If you keep a token in `.env` but want private full-auto mode, add `JAY_AUTO_TOKEN=1`.
 
 ### 2. Start watchdog
 
@@ -123,6 +123,7 @@ Useful watchdog variables:
 - `JAY_MAX_RESTARTS`: `0` means restart forever
 - `JAY_LOG_DIR`: log directory, default `logs`
 - `JAY_EXTRA_ARGS`: optional extra CLI args, for example `--verbose --jay-wallet-browser`
+- `JAY_AUTO_TOKEN`: set `1` to force Camoufox full-auto mode even if a manual token is present
 
 ---
 
