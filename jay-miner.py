@@ -2,8 +2,7 @@
 """
 JAY Network CLI Miner v2
 ========================
-CLI mining client for The Jay Network with manual `.env` token support
-and optional private Camoufox token management.
+CLI mining client for The Jay Network with manual `.env` token support.
 
 Usage:
     python3 jay-miner.py --wallet yjay1abc...xyz
@@ -22,10 +21,7 @@ import sys
 import os
 import argparse
 import signal
-import subprocess
-import threading
 from datetime import datetime
-from queue import Queue, Empty
 
 try:
     import websockets
@@ -52,8 +48,6 @@ SHARE_INTERVAL   = 5.0    # seconds between share submissions (pool min=750ms, u
 MIN_SHARE_GAP    = 2.0    # hard floor: never send shares faster than this (pool bans <750ms)
 PING_INTERVAL    = 30
 BALANCE_INTERVAL = 30
-TOKEN_LIFETIME   = 300  # token refresh cadence; avoid /api/ws-token 429 rate limits
-TOKEN_429_BACKOFF = 900  # /api/ws-token can rate-limit hard; do not retry aggressively
 MAX_RECONNECT    = 50
 RECONNECT_BASE   = 2.0
 INITIAL_DELAY    = 5.0    # wait after connect before first share
@@ -101,12 +95,6 @@ def resolve_manual_token(cli_token=None):
     return (cli_token or os.getenv("JAY_MINING_TOKEN") or os.getenv("JAY_WS_TOKEN") or os.getenv("JAY_TOKEN") or "").strip()
 
 
-def parse_env_bool(name, default=False):
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-
 
 def banner():
     print(f"""
@@ -115,138 +103,6 @@ def banner():
 ║       CLI client for The Jay Network        ║
 ╚════════════════════════════════════════════╝{C.R}
 """)
-
-# ═══════════════════════════════════════════
-# Persistent Token Manager (Camoufox)
-# ═══════════════════════════════════════════
-class TokenManager:
-    """Keeps a Camoufox browser open for fast token refreshes."""
-    
-    def __init__(self):
-        self._token_queue = Queue(maxsize=1)
-        self._stop = False
-        self._thread = None
-        self._page = None
-        self._browser = None
-        self._pw = None
-        self._ready = threading.Event()
-        self._display = ':99'
-        self._xvfb = None
-        self._ensure_xvfb()
-    
-    def _ensure_xvfb(self):
-        try:
-            subprocess.run(['xdpyinfo','-display',self._display],capture_output=True,timeout=2)
-        except:
-            self._xvfb = subprocess.Popen(
-                ['Xvfb',self._display,'-screen','0','1920x1080x24'],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1)
-    
-    def start(self):
-        """Start the persistent browser in a background thread."""
-        self._thread = threading.Thread(target=self._browser_loop, daemon=True)
-        self._thread.start()
-        # Wait for browser to be ready
-        if not self._ready.wait(timeout=60):
-            raise Exception("Camoufox browser failed to start within 60s")
-    
-    def _browser_loop(self):
-        """Persistent Camoufox session running in a thread."""
-        os.environ['DISPLAY'] = self._display
-        
-        from camoufox.sync_api import Camoufox
-        
-        while not self._stop:
-            try:
-                with Camoufox(headless=False, humanize=True, geoip=False) as browser:
-                    self._browser = browser
-                    page = browser.new_page()
-                    self._page = page
-                    
-                    # Initial load
-                    log("Loading mining site...", C.YEL, "🌐")
-                    page.goto(MINING_URL, wait_until='domcontentloaded', timeout=60000)
-                    page.wait_for_timeout(25000)
-                    
-                    title = page.title()
-                    if 'JAY Mining' not in title:
-                        page.wait_for_timeout(15000)
-                        title = page.title()
-                    
-                    if 'JAY Mining' in title:
-                        log("Mining site loaded ✓", C.GRN, "✅")
-                        self._ready.set()
-                        
-                        # Token refresh loop
-                        while not self._stop:
-                            try:
-                                result = page.evaluate('''async () => {
-                                    const r = await fetch("/api/ws-token", {
-                                        method: "POST",
-                                        headers: {"Content-Type": "application/json"}
-                                    });
-                                    const retryAfter = parseInt(r.headers.get("Retry-After") || "0", 10);
-                                    if (!r.ok) return {error: true, status: r.status, retryAfter};
-                                    return await r.json();
-                                }''')
-
-                                if result.get('error'):
-                                    status = result.get('status')
-                                    if status == 429:
-                                        wait_for = max(int(result.get('retryAfter') or 0), TOKEN_429_BACKOFF)
-                                        log(f"Token endpoint rate-limited (HTTP 429). Backing off {wait_for}s.", C.YEL, "⏳")
-                                        time.sleep(wait_for)
-                                        continue
-                                    raise Exception(f"HTTP {status}")
-
-                                token = result.get('token')
-                                if token:
-                                    # Put token, replacing old one if not consumed
-                                    if self._token_queue.full():
-                                        try: self._token_queue.get_nowait()
-                                        except: pass
-                                    self._token_queue.put(token)
-
-                                time.sleep(TOKEN_LIFETIME)
-
-                            except Exception as e:
-                                log(f"Token fetch error: {e}", C.RED, "⚠")
-                                # Page might have navigated away or lost session; reload only for non-rate-limit errors.
-                                try:
-                                    page.goto(MINING_URL, wait_until='domcontentloaded', timeout=60000)
-                                    page.wait_for_timeout(30000)
-                                except:
-                                    break  # restart browser
-                                time.sleep(60)
-                    else:
-                        log(f"Mining site failed to load (got: {title})", C.RED, "❌")
-                        time.sleep(10)
-                        
-            except Exception as e:
-                log(f"Browser error: {e}", C.RED, "❌")
-                time.sleep(10)
-    
-    def get_token(self, timeout=60):
-        """Get a fresh token (blocks until available)."""
-        try:
-            return self._token_queue.get(timeout=timeout)
-        except Empty:
-            raise Exception("Token timeout - no token available")
-    
-    def stop(self):
-        self._stop = True
-        try:
-            if self._page:
-                self._page.close()
-        except: pass
-        try:
-            if self._browser:
-                self._browser.close()
-        except: pass
-        if self._xvfb:
-            self._xvfb.terminate()
-
 
 class ManualTokenManager:
     """Simple token provider for manual/browser-supplied tokens."""
@@ -270,12 +126,11 @@ class ManualTokenManager:
 # Miner
 # ═══════════════════════════════════════════
 class JayMiner:
-    def __init__(self, wallet, threads=DEFAULT_THREADS, verbose=False, token=None, jay_wallet_browser=False):
+    def __init__(self, wallet, threads=DEFAULT_THREADS, verbose=False, token=None):
         self.wallet = wallet
         self.threads = threads
         self.verbose = verbose
         self.manual_token = token.strip() if token else None
-        self.jay_wallet_browser = bool(jay_wallet_browser)
         self.session_id = gen_id("session_")
         self.device_id = gen_id("device_")
         self.miner_id = None
@@ -293,7 +148,7 @@ class JayMiner:
         self._stop = False
         self._reconnects = 0
         self._ban_until = 0
-        self.token_mgr = ManualTokenManager(self.manual_token) if self.manual_token else TokenManager()
+        self.token_mgr = ManualTokenManager(self.manual_token)
 
     async def get_balance(self):
         try:
@@ -448,18 +303,12 @@ class JayMiner:
         banner()
         log(f"Wallet: {self.wallet}",C.CYN,"👛")
         log(f"Threads: {self.threads}",C.CYN,"🧵")
-        if self.jay_wallet_browser:
-            log("JAY Wallet browser flag: enabled",C.CYN,"🚀")
-        
         await self.get_balance()
         log(f"Balance: {self.balance:.6f} JAY",C.CYN,"💰")
         
         print()
-        if self.manual_token:
-            log("Using manual browser token mode",C.YEL,"🖐")
-        else:
-            log("Starting persistent Camoufox browser...",C.YEL,"🌐")
-            self.token_mgr.start()
+        log("Using configured browser token",C.YEL,"🔑")
+        self.token_mgr.start()
         
         log("Starting mining...",C.YEL,"⛏")
         
@@ -510,8 +359,7 @@ class JayMiner:
                     await self._send("start_mining",{
                         "wallet":self.wallet,"threads":self.threads,
                         "sessionId":self.session_id,"deviceId":self.device_id,
-                        "minerId":self.miner_id,
-                        "isJayWalletBrowser":self.jay_wallet_browser
+                        "minerId":self.miner_id
                     })
                     
                     tasks = [
@@ -583,8 +431,7 @@ def main():
     p.add_argument("--wallet","-w",required=True,help="JAY wallet (yjay1...)")
     p.add_argument("--threads","-t",type=int,default=DEFAULT_THREADS,help=f"Threads (default:{DEFAULT_THREADS})")
     p.add_argument("--verbose","-v",action="store_true")
-    p.add_argument("--token",help="Manual websocket token from /api/ws-token (or JAY_MINING_TOKEN in .env; skips Camoufox)")
-    p.add_argument("--jay-wallet-browser",action="store_true",help="Send isJayWalletBrowser=true in the pool start_mining payload; can also be enabled with JAY_WALLET_BROWSER=1")
+    p.add_argument("--token",help="WebSocket token from /api/ws-token (or JAY_MINING_TOKEN in .env)")
     p.add_argument("--info","-i",action="store_true",help="Show info and exit")
     p.add_argument("--version",action="version",version=f"JAY Network CLI Miner {VERSION}")
     args = p.parse_args()
@@ -593,13 +440,11 @@ def main():
         print(f"{C.RED}Invalid wallet address{C.R}"); sys.exit(1)
     
     manual_token = resolve_manual_token(args.token)
-    jay_wallet_browser = args.jay_wallet_browser or parse_env_bool("JAY_WALLET_BROWSER")
     miner = JayMiner(
         args.wallet,
         max(1,min(args.threads,32)),
         args.verbose,
         token=manual_token,
-        jay_wallet_browser=jay_wallet_browser,
     )
     
     if args.info:

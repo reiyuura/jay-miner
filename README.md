@@ -9,7 +9,6 @@ This project is designed around a safe public flow:
 3. Save it in `.env`.
 4. Run the miner from your terminal.
 
-> Manual `.env` mode is recommended for public/shared usage. The browser automation mode is kept as an optional private/local fallback.
 
 ---
 
@@ -20,8 +19,6 @@ This project is designed around a safe public flow:
 - Wallet balance lookup from the JAY LCD API
 - Auto reconnect and periodic mining status logs
 - Configurable thread count
-- Optional `isJayWalletBrowser=true` payload flag
-- Optional private Camoufox-based token refresh mode
 
 ---
 
@@ -153,19 +150,12 @@ Pass token directly instead of `.env`:
 python3 jay-miner.py --wallet yjay1abc...xyz --token your_ws_token_here
 ```
 
-Enable the optional JAY Wallet browser payload flag:
-
-```bash
-python3 jay-miner.py --wallet yjay1abc...xyz --jay-wallet-browser
-```
 
 ---
 
-## Token Modes
+## Token Configuration
 
-### Recommended: manual `.env` mode
-
-Manual mode is used when any of these are set:
+The miner can read a WebSocket token from any of these:
 
 - `JAY_MINING_TOKEN`
 - `JAY_WS_TOKEN`
@@ -181,19 +171,6 @@ Priority order:
 
 `.env` is preferred because it avoids putting tokens in your shell history.
 
-### Optional: private auto mode
-
-If no manual token is found, the miner tries to use the Camoufox browser flow to fetch/refresh tokens automatically.
-
-This mode is intended for private/local use only and may require extra setup:
-
-```bash
-pip install camoufox
-sudo apt install xvfb
-```
-
-For public usage, manual `.env` mode is simpler and more reliable.
-
 ---
 
 ## Configuration
@@ -203,7 +180,6 @@ Supported environment variables:
 - `JAY_MINING_TOKEN`: primary WebSocket token variable
 - `JAY_WS_TOKEN`: alternate token variable
 - `JAY_TOKEN`: alternate token variable
-- `JAY_WALLET_BROWSER`: set to `1`, `true`, `yes`, or `on` to send `isJayWalletBrowser=true`
 
 `.env` is loaded from:
 
@@ -246,9 +222,6 @@ pip install -r requirements.txt
 
 Get a fresh token from the mining website and update `.env`.
 
-### Site verification blocks automation
-
-Use manual `.env` mode with a normal browser. You do not need Camoufox for manual mode.
 
 ### Too many disconnects
 
@@ -266,7 +239,6 @@ Then increase slowly if shares are accepted and the connection stays stable.
 
 - Never commit `.env`.
 - Never share your WebSocket token publicly.
-- The `isJayWalletBrowser` flag only changes the mining payload; final eligibility/reward decisions are handled by the official server.
 - This CLI does not guarantee rewards, multipliers, or acceptance by the pool.
 
 ---
