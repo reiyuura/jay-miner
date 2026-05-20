@@ -1,139 +1,216 @@
 # JAY Network CLI Miner ⛏️
 
-A lightweight Python CLI miner for **The Jay Network**.
+Unofficial Python CLI miner for **The Jay Network**.
 
-The public release flow is intentionally simple:
+This project is designed around a safe public flow:
 
-1. Get a WebSocket token from the official mining website in your browser.
-2. Put the token in `.env`.
-3. Run the miner from your terminal.
+1. Open the official JAY mining site in your browser.
+2. Copy your WebSocket token from `/api/ws-token`.
+3. Save it in `.env`.
+4. Run the miner from your terminal.
 
-Private browser automation is still available as an optional fallback, but manual `.env` mode is the recommended mode for public/shared usage.
+> Manual `.env` mode is recommended for public/shared usage. The browser automation mode is kept as an optional private/local fallback.
+
+---
 
 ## Features
 
-- Connects to the JAY mining pool over WebSocket
-- Manual token mode via `.env` or `--token`
-- Wallet balance lookup via the JAY LCD API
-- Reconnect handling and periodic status output
-- Optional JAY Wallet browser payload flag (`isJayWalletBrowser=true`)
-- Optional private Camoufox token refresh mode
+- WebSocket mining client for the JAY pool
+- Manual token mode via `.env`, environment variables, or `--token`
+- Wallet balance lookup from the JAY LCD API
+- Auto reconnect and periodic mining status logs
+- Configurable thread count
+- Optional `isJayWalletBrowser=true` payload flag
+- Optional private Camoufox-based token refresh mode
+
+---
 
 ## Requirements
 
-- Python 3.10+
-- A JAY wallet address (`yjay...`)
-- A browser token copied from `https://mining.thejaynetwork.com`
+- Python **3.10+**
+- A JAY wallet address, for example `yjay...`
+- A browser token from `https://mining.thejaynetwork.com`
 
-Install Python dependencies:
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
+---
+
 ## Quick Start
 
-1. Clone/install dependencies, then copy the environment template:
+### 1. Clone the repo
+
+```bash
+git clone https://github.com/reiyuura/jay-miner.git
+cd jay-miner
+```
+
+If you already cloned it before, update it with:
+
+```bash
+git pull
+```
+
+### 2. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Create your `.env`
 
 ```bash
 cp .env.example .env
 ```
 
-2. Edit `.env` and add your token:
+Edit `.env` and set your browser token:
 
 ```bash
 JAY_MINING_TOKEN=your_ws_token_here
 ```
 
-3. Start mining:
+### 4. Start mining
 
 ```bash
 python3 jay-miner.py --wallet yjay1abc...xyz
 ```
 
-## Usage
+Use your real JAY wallet address instead of `yjay1abc...xyz`.
+
+---
+
+## How to Get `JAY_MINING_TOKEN`
+
+1. Open `https://mining.thejaynetwork.com` in a normal browser.
+2. Complete any verification/checkpoint if it appears.
+3. Wait until the mining page loads.
+4. Open browser DevTools.
+5. Go to the **Network** tab.
+6. Refresh the page.
+7. Find the request named `POST /api/ws-token`.
+8. Open the response body.
+9. Copy the `token` value.
+10. Paste it into `.env`:
 
 ```bash
-# Show help
+JAY_MINING_TOKEN=your_ws_token_here
+```
+
+The token is used by the CLI to connect to:
+
+```text
+wss://api-pool.winnode.xyz
+```
+
+> Do not commit `.env` or share your token publicly.
+
+---
+
+## Common Commands
+
+Show help:
+
+```bash
 python3 jay-miner.py --help
+```
 
-# Show version
+Show version:
+
+```bash
 python3 jay-miner.py --version
+```
 
-# Show wallet balance only
+Check wallet balance only:
+
+```bash
 python3 jay-miner.py --wallet yjay1abc...xyz --info
+```
 
-# Start mining with default 4 threads
+Start mining with default threads:
+
+```bash
 python3 jay-miner.py --wallet yjay1abc...xyz
+```
 
-# Use more threads
+Start mining with more threads:
+
+```bash
 python3 jay-miner.py --wallet yjay1abc...xyz --threads 8
+```
 
-# Verbose logs
+Enable verbose logs:
+
+```bash
 python3 jay-miner.py --wallet yjay1abc...xyz --verbose
+```
 
-# Optional direct token override; .env is preferred
+Pass token directly instead of `.env`:
+
+```bash
 python3 jay-miner.py --wallet yjay1abc...xyz --token your_ws_token_here
+```
 
-# Optional JAY Wallet browser flag
+Enable the optional JAY Wallet browser payload flag:
+
+```bash
 python3 jay-miner.py --wallet yjay1abc...xyz --jay-wallet-browser
 ```
 
-## How to Get the Token Manually
-
-1. Open `https://mining.thejaynetwork.com` in Chrome, Firefox, or another modern browser.
-2. Complete any site verification/checkpoint if it appears.
-3. Wait until the `JAY Mining` page fully loads.
-4. Open DevTools → **Network**.
-5. Refresh the page.
-6. Find the `POST /api/ws-token` request.
-7. Open the request and copy the `token` value from the JSON response.
-8. Paste it into `.env`:
-
-```bash
-JAY_MINING_TOKEN=your_ws_token_here
-```
-
-The token is used to connect to `wss://api-pool.winnode.xyz`.
+---
 
 ## Token Modes
 
-### Public/manual mode recommended
+### Recommended: manual `.env` mode
 
-Manual mode is used when one of these is set:
+Manual mode is used when any of these are set:
 
-- `JAY_MINING_TOKEN` in `.env` or your shell environment
-- `JAY_WS_TOKEN` in `.env` or your shell environment
-- `JAY_TOKEN` in `.env` or your shell environment
+- `JAY_MINING_TOKEN`
+- `JAY_WS_TOKEN`
+- `JAY_TOKEN`
 - `--token your_ws_token_here`
 
-`--token` overrides `.env`, but `.env` is preferred because it avoids putting tokens in shell history.
+Priority order:
 
-### Private/auto mode optional
+1. `--token`
+2. `JAY_MINING_TOKEN`
+3. `JAY_WS_TOKEN`
+4. `JAY_TOKEN`
 
-If no manual token is found, the miner falls back to the Camoufox browser flow and tries to refresh tokens automatically.
+`.env` is preferred because it avoids putting tokens in your shell history.
 
-This mode is intended for private/local use only. It requires extra dependencies and may need Linux display tooling such as Xvfb:
+### Optional: private auto mode
+
+If no manual token is found, the miner tries to use the Camoufox browser flow to fetch/refresh tokens automatically.
+
+This mode is intended for private/local use only and may require extra setup:
 
 ```bash
 pip install camoufox
-# Debian/Ubuntu, if needed:
 sudo apt install xvfb
 ```
+
+For public usage, manual `.env` mode is simpler and more reliable.
+
+---
 
 ## Configuration
 
 Supported environment variables:
 
-- `JAY_MINING_TOKEN`: WebSocket token copied from `/api/ws-token`
-- `JAY_WS_TOKEN`: alternate token variable name
-- `JAY_TOKEN`: alternate token variable name
+- `JAY_MINING_TOKEN`: primary WebSocket token variable
+- `JAY_WS_TOKEN`: alternate token variable
+- `JAY_TOKEN`: alternate token variable
 - `JAY_WALLET_BROWSER`: set to `1`, `true`, `yes`, or `on` to send `isJayWalletBrowser=true`
 
-`.env` is loaded from both:
+`.env` is loaded from:
 
 - the script directory
 - the current working directory
+
+---
 
 ## Network Endpoints
 
@@ -143,24 +220,62 @@ Supported environment variables:
 - Chain LCD: `https://api-jayn.winnode.xyz`
 - RPC: `https://rpc-jayn.winnode.xyz`
 
+---
+
 ## Chain Info
 
 - Chain ID: `thejaynetwork`
 - Address prefix: `yjay`
-- Denom: `ujay` (`1 JAY = 1,000,000 ujay`)
+- Denom: `ujay`
+- Conversion: `1 JAY = 1,000,000 ujay`
 - Coin type: `118`
 
-## Notes
+---
 
-- Tokens can expire periodically; update `.env` if the pool rejects your token.
-- The CLI automatically reconnects on connection drops.
-- Manual mode does not require Camoufox or Xvfb.
-- The JAY Wallet browser flag only changes the `start_mining` payload. Any 2x reward eligibility is decided by the official pool/server, not by this CLI.
-- Do not commit `.env` or share your token publicly.
+## Troubleshooting
+
+### `Missing dependency`
+
+Install requirements again:
+
+```bash
+pip install -r requirements.txt
+```
+
+### Token rejected or expired
+
+Get a fresh token from the mining website and update `.env`.
+
+### Site verification blocks automation
+
+Use manual `.env` mode with a normal browser. You do not need Camoufox for manual mode.
+
+### Too many disconnects
+
+Try fewer threads first:
+
+```bash
+python3 jay-miner.py --wallet yjay1abc...xyz --threads 2
+```
+
+Then increase slowly if shares are accepted and the connection stays stable.
+
+---
+
+## Safety Notes
+
+- Never commit `.env`.
+- Never share your WebSocket token publicly.
+- The `isJayWalletBrowser` flag only changes the mining payload; final eligibility/reward decisions are handled by the official server.
+- This CLI does not guarantee rewards, multipliers, or acceptance by the pool.
+
+---
 
 ## Disclaimer
 
 This is an unofficial community CLI client. Use it at your own risk and follow The Jay Network's current rules, rate limits, and terms.
+
+---
 
 ## License
 
