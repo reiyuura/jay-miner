@@ -2,7 +2,8 @@
 """
 JAY Network CLI Miner v2
 ========================
-CLI mining client for The Jay Network with optional Camoufox token management.
+CLI mining client for The Jay Network with manual `.env` token support
+and optional private Camoufox token management.
 
 Usage:
     python3 jay-miner.py --wallet yjay1abc...xyz
@@ -44,6 +45,7 @@ POOL_WS_URL   = "wss://api-pool.winnode.xyz"
 POOL_API_URL  = "https://api-pool.winnode.xyz"
 CHAIN_API_URL = "https://api-jayn.winnode.xyz"
 MINING_URL    = "https://mining.thejaynetwork.com"
+VERSION       = "1.0.0"
 
 DEFAULT_THREADS  = 4
 SHARE_INTERVAL   = 5.0    # seconds between share submissions (pool min=750ms, use generous gap)
@@ -102,7 +104,7 @@ def banner():
     print(f"""
 {C.CYN}{C.B}╔════════════════════════════════════════════╗
 ║        ⛏️   JAY NETWORK CLI MINER   ⛏️       ║
-║  Reverse-engineered from mining.jay.network ║
+║       CLI client for The Jay Network        ║
 ╚════════════════════════════════════════════╝{C.R}
 """)
 
@@ -551,6 +553,7 @@ def main():
     p.add_argument("--verbose","-v",action="store_true")
     p.add_argument("--token",help="Manual websocket token from /api/ws-token (or JAY_MINING_TOKEN in .env; skips Camoufox)")
     p.add_argument("--info","-i",action="store_true",help="Show info and exit")
+    p.add_argument("--version",action="version",version=f"JAY Network CLI Miner {VERSION}")
     args = p.parse_args()
     
     if not args.wallet.startswith("yjay"):

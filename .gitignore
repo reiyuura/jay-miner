@@ -1,4 +1,17 @@
 __pycache__/
 *.pyc
+*.pyo
 *.bak
+
+# Local secrets/config
 .env
+.env.*
+!.env.example
+
+# Runtime output
+logs/
+*.log
+
+# Virtual environments
+.venv/
+venv/
