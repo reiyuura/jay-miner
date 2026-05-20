@@ -52,7 +52,7 @@ SHARE_INTERVAL   = 5.0    # seconds between share submissions (pool min=750ms, u
 MIN_SHARE_GAP    = 2.0    # hard floor: never send shares faster than this (pool bans <750ms)
 PING_INTERVAL    = 30
 BALANCE_INTERVAL = 30
-TOKEN_LIFETIME   = 50  # refresh before 60s expiry
+TOKEN_LIFETIME   = 300  # token refresh cadence; avoid /api/ws-token 429 rate limits
 MAX_RECONNECT    = 50
 RECONNECT_BASE   = 2.0
 INITIAL_DELAY    = 5.0    # wait after connect before first share
@@ -455,10 +455,20 @@ class JayMiner:
         while not self._stop and self._reconnects < MAX_RECONNECT:
             try:
                 token = self.token_mgr.get_token(timeout=60)
-                log(f"Token: {token[:16]}...",C.GRN,"🔓")
+                log("Token acquired",C.GRN,"🔓")
                 
                 async with websockets.connect(
                     f"{POOL_WS_URL}?token={token}",
+                    origin=MINING_URL,
+                    user_agent_header=(
+                        "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) "
+                        "Gecko/20100101 Firefox/140.0"
+                    ),
+                    additional_headers={
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Cache-Control": "no-cache",
+                        "Pragma": "no-cache",
+                    },
                     ping_interval=20, ping_timeout=10,
                     close_timeout=5, max_size=2**20,
                 ) as ws:
