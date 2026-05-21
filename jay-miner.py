@@ -130,6 +130,8 @@ class TokenManager:
         self._browser = None
         self._pw = None
         self._ready = threading.Event()
+        self._rate_limited_until = 0
+        self._last_token_at = 0
         self._display = ':99'
         self._xvfb = None
         self._ensure_xvfb()
@@ -195,6 +197,7 @@ class TokenManager:
                                     status = result.get('status')
                                     if status == 429:
                                         wait_for = max(int(result.get('retryAfter') or 0), TOKEN_429_BACKOFF)
+                                        self._rate_limited_until = time.time() + wait_for
                                         log(f"Token endpoint rate-limited (HTTP 429). Backing off {wait_for}s.", C.YEL, "⏳")
                                         time.sleep(wait_for)
                                         continue
@@ -202,6 +205,8 @@ class TokenManager:
 
                                 token = result.get('token')
                                 if token:
+                                    self._rate_limited_until = 0
+                                    self._last_token_at = time.time()
                                     # Put token, replacing old one if not consumed
                                     if self._token_queue.full():
                                         try: self._token_queue.get_nowait()
@@ -229,10 +234,20 @@ class TokenManager:
     
     def get_token(self, timeout=60):
         """Get a fresh token (blocks until available)."""
-        try:
-            return self._token_queue.get(timeout=timeout)
-        except Empty:
-            raise Exception("Token timeout - no token available")
+        deadline = time.time() + timeout
+        while not self._stop:
+            wait_timeout = max(1, deadline - time.time())
+            rate_limit_remaining = max(0, self._rate_limited_until - time.time())
+            if rate_limit_remaining:
+                # The browser token loop is intentionally sleeping to honor HTTP 429.
+                # Keep the miner waiting instead of producing a reconnect error every 60s.
+                wait_timeout = max(wait_timeout, rate_limit_remaining + 30)
+            try:
+                return self._token_queue.get(timeout=wait_timeout)
+            except Empty:
+                if time.time() >= self._rate_limited_until:
+                    break
+        raise Exception("Token timeout - no token available")
     
     def stop(self):
         self._stop = True
