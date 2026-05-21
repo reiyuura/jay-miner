@@ -132,6 +132,7 @@ class TokenManager:
         self._ready = threading.Event()
         self._rate_limited_until = 0
         self._last_token_at = 0
+        self._consecutive_429 = 0
         self._display = ':99'
         self._xvfb = None
         self._ensure_xvfb()
@@ -197,15 +198,23 @@ class TokenManager:
                                     status = result.get('status')
                                     if status == 429:
                                         wait_for = max(int(result.get('retryAfter') or 0), TOKEN_429_BACKOFF)
+                                        self._consecutive_429 += 1
                                         self._rate_limited_until = time.time() + wait_for
-                                        log(f"Token endpoint rate-limited (HTTP 429). Backing off {wait_for}s.", C.YEL, "⏳")
+                                        log(f"Token endpoint rate-limited (HTTP 429). Backing off {wait_for}s. ({self._consecutive_429}/3)", C.YEL, "⏳")
+                                        if self._consecutive_429 >= 3:
+                                            log("Repeated token rate limits; restarting browser session.", C.YEL, "🔄")
+                                            self._rate_limited_until = 0
+                                            self._consecutive_429 = 0
+                                            break
                                         time.sleep(wait_for)
                                         continue
+                                    self._consecutive_429 = 0
                                     raise Exception(f"HTTP {status}")
 
                                 token = result.get('token')
                                 if token:
                                     self._rate_limited_until = 0
+                                    self._consecutive_429 = 0
                                     self._last_token_at = time.time()
                                     # Put token, replacing old one if not consumed
                                     if self._token_queue.full():
