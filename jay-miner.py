@@ -26,6 +26,7 @@ import subprocess
 import threading
 from datetime import datetime
 from queue import Queue, Empty
+from urllib.parse import urlencode
 
 try:
     import websockets
@@ -122,7 +123,10 @@ def banner():
 class TokenManager:
     """Keeps a Camoufox browser open for fast token refreshes."""
     
-    def __init__(self):
+    def __init__(self, session_id=None, device_id=None):
+        self.session_id = session_id or gen_id("session_")
+        self.device_id = device_id or gen_id("device_")
+        self._token_generation = 0
         self._token_queue = Queue(maxsize=1)
         self._stop = False
         self._thread = None
@@ -184,12 +188,39 @@ class TokenManager:
                         # Token refresh loop
                         while not self._stop:
                             try:
-                                result = page.evaluate('''async () => {
-                                    const r = await fetch("/api/ws-token", { method: "POST" });
+                                self._token_generation += 1
+                                result = page.evaluate('''async ({sessionId, deviceId, tokenGeneration}) => {
+                                    const ua = navigator.userAgent;
+                                    const screenInfo = `${screen.width}x${screen.height}x${screen.colorDepth}`;
+                                    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+                                    const language = navigator.language || "en-US";
+                                    const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+                                    const fingerprint = btoa([ua, screenInfo, tz, language].join("|")).slice(0, 64);
+                                    const r = await fetch("/api/ws-token", {
+                                        method: "POST",
+                                        headers: {
+                                            "Content-Type": "application/json",
+                                            "X-Client-Fingerprint": fingerprint,
+                                            "X-Token-Generation": String(tokenGeneration),
+                                            "X-Request-ID": requestId,
+                                            "X-Session-ID": sessionId,
+                                            "X-Device-ID": deviceId,
+                                            "X-Client-UA": btoa(ua).slice(0, 32),
+                                            "X-Client-Screen": btoa(screenInfo).slice(0, 16),
+                                            "X-Client-TZ": btoa(tz).slice(0, 16),
+                                        },
+                                    });
                                     const retryAfter = parseInt(r.headers.get("Retry-After") || "0", 10);
-                                    if (!r.ok) return {error: true, status: r.status, retryAfter};
+                                    if (!r.ok) {
+                                        const text = await r.text().catch(() => "");
+                                        return {error: true, status: r.status, retryAfter, body: text.slice(0, 240)};
+                                    }
                                     return await r.json();
-                                }''')
+                                }''', {
+                                    "sessionId": self.session_id,
+                                    "deviceId": self.device_id,
+                                    "tokenGeneration": self._token_generation,
+                                })
 
                                 if result.get('error'):
                                     status = result.get('status')
@@ -206,7 +237,8 @@ class TokenManager:
                                         time.sleep(wait_for)
                                         continue
                                     self._consecutive_429 = 0
-                                    raise Exception(f"HTTP {status}")
+                                    body = (result.get('body') or '').strip().replace('\n', ' ')[:240]
+                                    raise Exception(f"HTTP {status}: {body}" if body else f"HTTP {status}")
 
                                 token = result.get('token')
                                 if token:
@@ -314,7 +346,7 @@ class JayMiner:
         self._stop = False
         self._reconnects = 0
         self._ban_until = 0
-        self.token_mgr = ManualTokenManager(self.manual_token) if self.manual_token else TokenManager()
+        self.token_mgr = ManualTokenManager(self.manual_token) if self.manual_token else TokenManager(self.session_id, self.device_id)
 
     async def get_balance(self):
         try:
@@ -489,8 +521,14 @@ class JayMiner:
                 token = self.token_mgr.get_token(timeout=60)
                 log("Token acquired",C.GRN,"🔓")
                 
+                ws_query = urlencode({
+                    "token": token,
+                    "sessionId": self.session_id,
+                    "deviceId": self.device_id,
+                })
+
                 async with websockets.connect(
-                    f"{POOL_WS_URL}?token={token}",
+                    f"{POOL_WS_URL}?{ws_query}",
                     origin=MINING_URL,
                     user_agent_header=(
                         "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) "
