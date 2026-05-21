@@ -185,10 +185,7 @@ class TokenManager:
                         while not self._stop:
                             try:
                                 result = page.evaluate('''async () => {
-                                    const r = await fetch("/api/ws-token", {
-                                        method: "POST",
-                                        headers: {"Content-Type": "application/json"}
-                                    });
+                                    const r = await fetch("/api/ws-token", { method: "POST" });
                                     const retryAfter = parseInt(r.headers.get("Retry-After") || "0", 10);
                                     if (!r.ok) return {error: true, status: r.status, retryAfter};
                                     return await r.json();
