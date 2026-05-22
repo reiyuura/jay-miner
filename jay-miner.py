@@ -23,9 +23,7 @@ import os
 import argparse
 import signal
 import subprocess
-import threading
 from datetime import datetime
-from queue import Queue, Empty
 from urllib.parse import urlencode
 
 try:
@@ -118,28 +116,23 @@ def banner():
 """)
 
 # ═══════════════════════════════════════════
-# Persistent Token Manager (Camoufox)
+# On-demand Token Manager (Camoufox)
 # ═══════════════════════════════════════════
 class TokenManager:
-    """Keeps a Camoufox browser open for automatic token refreshes."""
-    
+    """Opens Camoufox only when a fresh browser token is needed, then closes it."""
+
     def __init__(self, session_id=None, device_id=None):
         self.session_id = session_id or gen_id("session_")
         self.device_id = device_id or gen_id("device_")
         self._token_generation = 0
-        self._token_queue = Queue(maxsize=1)
         self._stop = False
-        self._thread = None
-        self._page = None
-        self._browser = None
-        self._ready = threading.Event()
         self._rate_limited_until = 0
         self._last_token_at = 0
         self._consecutive_429 = 0
         self._display = ':99'
         self._xvfb = None
         self._ensure_xvfb()
-    
+
     def _ensure_xvfb(self):
         try:
             subprocess.run(['xdpyinfo','-display',self._display],capture_output=True,timeout=2)
@@ -148,18 +141,10 @@ class TokenManager:
                 ['Xvfb',self._display,'-screen','0','1920x1080x24'],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(1)
-    
-    def start(self):
-        """Start the persistent browser in a background thread."""
-        try:
-            import camoufox.sync_api  # noqa: F401
-        except ImportError as e:
-            raise SystemExit("Missing dependency: camoufox. Run: pip install -r requirements.txt && python3 -m camoufox fetch") from e
 
-        self._thread = threading.Thread(target=self._browser_loop, daemon=True)
-        self._thread.start()
-        if not self._ready.wait(timeout=90):
-            raise Exception("Camoufox browser failed to start within 90s")
+    def start(self):
+        """No persistent browser is started; token fetch is lazy/on-demand."""
+        return None
 
     def _fetch_token_from_page(self, page):
         self._token_generation += 1
@@ -196,31 +181,29 @@ class TokenManager:
             "tokenGeneration": self._token_generation,
         })
 
-    def _put_token(self, token):
-        if self._token_queue.full():
-            try:
-                self._token_queue.get_nowait()
-            except Empty:
-                pass
-        self._token_queue.put(token)
-
-    def _browser_loop(self):
-        """Persistent Camoufox session running in a thread."""
+    def get_token(self, timeout=180):
+        """Fetch a fresh token by briefly opening Camoufox, then closing it."""
+        deadline = time.time() + timeout
         os.environ['DISPLAY'] = self._display
-        try:
-            from camoufox.sync_api import Camoufox
-        except ImportError:
-            log("Missing dependency: camoufox. Run: pip install camoufox && python3 -m camoufox fetch", C.RED, "❌")
-            return
 
         while not self._stop:
-            try:
-                log("Starting persistent Camoufox browser...", C.YEL, "🌐")
-                with Camoufox(headless=False, humanize=True, geoip=False) as browser:
-                    self._browser = browser
-                    page = browser.new_page()
-                    self._page = page
+            rate_limit_remaining = max(0, self._rate_limited_until - time.time())
+            if rate_limit_remaining:
+                log(f"Token endpoint rate-limited. Waiting {int(rate_limit_remaining)}s before retry...", C.YEL, "⏳")
+                time.sleep(rate_limit_remaining)
 
+            if time.time() >= deadline:
+                break
+
+            try:
+                from camoufox.sync_api import Camoufox
+            except ImportError as e:
+                raise SystemExit("Missing dependency: camoufox. Run: pip install camoufox && python3 -m camoufox fetch") from e
+
+            log("Opening Camoufox for token refresh...", C.YEL, "🌐")
+            try:
+                with Camoufox(headless=False, humanize=True, geoip=False) as browser:
+                    page = browser.new_page()
                     log("Loading mining site...", C.YEL, "🌐")
                     page.goto(MINING_URL, wait_until='domcontentloaded', timeout=60000)
                     page.wait_for_timeout(25000)
@@ -231,73 +214,37 @@ class TokenManager:
                     if 'JAY Mining' not in title:
                         raise Exception(f"Mining site failed to load (got: {title})")
 
-                    log("Mining site loaded ✓", C.GRN, "✅")
-                    self._ready.set()
-
-                    while not self._stop:
-                        rate_limit_remaining = max(0, self._rate_limited_until - time.time())
-                        if rate_limit_remaining:
-                            log(f"Token endpoint rate-limited. Waiting {int(rate_limit_remaining)}s before retry...", C.YEL, "⏳")
-                            time.sleep(rate_limit_remaining)
+                    result = self._fetch_token_from_page(page)
+                    if result.get('error'):
+                        status = result.get('status')
+                        if status == 429:
+                            wait_for = max(int(result.get('retryAfter') or 0), TOKEN_429_BACKOFF)
+                            self._consecutive_429 += 1
+                            self._rate_limited_until = time.time() + wait_for
+                            log(f"Token endpoint rate-limited (HTTP 429). Backing off {wait_for}s.", C.YEL, "⏳")
                             continue
+                        self._consecutive_429 = 0
+                        body = (result.get('body') or '').strip().replace('\n', ' ')[:240]
+                        raise Exception(f"HTTP {status}: {body}" if body else f"HTTP {status}")
 
-                        try:
-                            result = self._fetch_token_from_page(page)
-                            if result.get('error'):
-                                status = result.get('status')
-                                if status == 429:
-                                    wait_for = max(int(result.get('retryAfter') or 0), TOKEN_429_BACKOFF)
-                                    self._consecutive_429 += 1
-                                    self._rate_limited_until = time.time() + wait_for
-                                    log(f"Token endpoint rate-limited (HTTP 429). Backing off {wait_for}s.", C.YEL, "⏳")
-                                    continue
-                                self._consecutive_429 = 0
-                                body = (result.get('body') or '').strip().replace('\n', ' ')[:240]
-                                raise Exception(f"HTTP {status}: {body}" if body else f"HTTP {status}")
-
-                            token = result.get('token')
-                            if not token:
-                                raise Exception("No token in /api/ws-token response")
-
-                            self._rate_limited_until = 0
-                            self._consecutive_429 = 0
-                            self._last_token_at = time.time()
-                            self._put_token(token)
-                            log("Token refreshed", C.GRN, "🔓")
-                            time.sleep(TOKEN_LIFETIME)
-                        except Exception as e:
-                            log(f"Token fetch error: {e}; reloading page...", C.RED, "⚠")
-                            try:
-                                page.goto(MINING_URL, wait_until='domcontentloaded', timeout=60000)
-                                page.wait_for_timeout(30000)
-                            except Exception:
-                                break
-                            time.sleep(5)
+                    token = result.get('token')
+                    if token:
+                        self._rate_limited_until = 0
+                        self._consecutive_429 = 0
+                        self._last_token_at = time.time()
+                        log("Token refreshed; closing Camoufox", C.GRN, "🔓")
+                        return token
+                    raise Exception("No token in /api/ws-token response")
             except Exception as e:
-                if not self._ready.is_set():
-                    self._ready.set()
-                log(f"Browser error: {e}; restarting...", C.RED, "❌")
+                if time.time() >= deadline:
+                    raise
+                log(f"Token fetch error: {e}; retrying...", C.RED, "⚠")
                 time.sleep(10)
 
-    def get_token(self, timeout=None):
-        """Get the newest token produced by the persistent browser."""
-        try:
-            return self._token_queue.get(timeout=timeout)
-        except Empty:
-            raise Exception("Token timeout - no token available")
-    
+        raise Exception("Token timeout - no token available")
+
     def stop(self):
         self._stop = True
-        try:
-            if self._page:
-                self._page.close()
-        except Exception:
-            pass
-        try:
-            if self._browser:
-                self._browser.close()
-        except Exception:
-            pass
         if self._xvfb:
             self._xvfb.terminate()
 
@@ -364,7 +311,7 @@ class JayMiner:
     def _handle(self, data):
         t = data.get("type","")
         p = data.get("payload",{})
-        
+
         if t == "job":
             self.current_job_id = p.get("jobId","")
             if self.verbose: log(f"Job: {self.current_job_id[:16]}...",C.CYN,"📋")
@@ -425,15 +372,15 @@ class JayMiner:
             if self.mining:
                 break
             await asyncio.sleep(1)
-        
+
         if not self.mining:
             log("Mining not started (no auth_success). Skipping share loop.", C.YEL, "⚠")
             return
-        
+
         # Initial delay after connect to avoid "spam" detection
         log(f"Waiting {INITIAL_DELAY:.0f}s before first share...", C.D, "⏳")
         await asyncio.sleep(INITIAL_DELAY)
-        
+
         prob = min(0.15 + self.threads * 0.02, 0.5)
         last_share = 0
         while not self._stop and self.connected:
@@ -504,24 +451,24 @@ class JayMiner:
         log(f"Threads: {self.threads}",C.CYN,"🧵")
         if self.jay_wallet_browser:
             log("JAY Wallet browser flag: enabled",C.CYN,"🚀")
-        
+
         await self.get_balance()
         log(f"Balance: {self.balance:.6f} JAY",C.CYN,"💰")
-        
+
         print()
         if self.manual_token:
             log("Using manual browser token mode",C.YEL,"🖐")
         else:
-            log("Camoufox auto-token mode enabled (persistent browser refresh)",C.YEL,"🌐")
+            log("Camoufox auto-token mode enabled (browser opens only when a token is needed)",C.YEL,"🌐")
             self.token_mgr.start()
-        
+
         log("Starting mining...",C.YEL,"⛏")
-        
+
         while not self._stop and self._reconnects < MAX_RECONNECT:
             try:
-                token = await asyncio.to_thread(self.token_mgr.get_token, timeout=None)
+                token = await asyncio.to_thread(self.token_mgr.get_token, timeout=1800)
                 log("Token acquired",C.GRN,"🔓")
-                
+
                 ws_query = urlencode({
                     "token": token,
                     "sessionId": self.session_id,
@@ -546,12 +493,12 @@ class JayMiner:
                     self.ws = ws
                     self.connected = True
                     self._reconnects = 0
-                    
+
                     log("Connected!",C.GRN,"✅")
-                    
+
                     # Small delay before sending commands
                     await asyncio.sleep(1)
-                    
+
                     # Force-stop any existing mining session for this wallet
                     for _ in range(3):
                         await self._send("stop_mining",{
@@ -565,7 +512,7 @@ class JayMiner:
                         "wallet":self.wallet
                     })
                     await asyncio.sleep(2)
-                    
+
                     # Start mining directly (pool doesn't support 'register')
                     await self._send("start_mining",{
                         "wallet":self.wallet,"threads":self.threads,
@@ -573,14 +520,14 @@ class JayMiner:
                         "minerId":self.miner_id,
                         "isJayWalletBrowser":self.jay_wallet_browser
                     })
-                    
+
                     tasks = [
                         asyncio.create_task(self._mining_loop()),
                         asyncio.create_task(self._ping_loop()),
                         asyncio.create_task(self._balance_loop()),
                         asyncio.create_task(self._stats_loop()),
                     ]
-                    
+
                     try:
                         async for msg in ws:
                             if self._stop: break
@@ -591,19 +538,19 @@ class JayMiner:
                     finally:
                         for t in tasks: t.cancel()
                         await asyncio.gather(*tasks, return_exceptions=True)
-                        
+
             except Exception as e:
                 log(f"Error: {type(e).__name__}: {e}",C.RED,"❌")
-            
+
             self.connected = False
             self.mining = False
             self._reconnects += 1
-            
+
             if not self._stop and self._reconnects < MAX_RECONNECT:
                 w = min(RECONNECT_BASE*(2**min(self._reconnects,6)), 30)
                 log(f"Reconnecting in {w:.0f}s ({self._reconnects}/{MAX_RECONNECT})",C.YEL,"🔄")
                 await asyncio.sleep(w)
-        
+
         await self._shutdown()
 
     async def _shutdown(self):
@@ -615,7 +562,7 @@ class JayMiner:
             except: pass
         self.connected = False
         self.token_mgr.stop()
-        
+
         if self.start_time:
             e=time.time()-self.start_time
             h,m,s=int(e//3600),int((e%3600)//60),int(e%60)
@@ -649,10 +596,10 @@ def main():
     p.add_argument("--info","-i",action="store_true",help="Show info and exit")
     p.add_argument("--version",action="version",version=f"JAY Network CLI Miner {VERSION}")
     args = p.parse_args()
-    
+
     if not args.wallet.startswith("yjay"):
         print(f"{C.RED}Invalid wallet address{C.R}"); sys.exit(1)
-    
+
     auto_token = args.auto_token or parse_env_bool("JAY_AUTO_TOKEN")
     manual_token = "" if auto_token else resolve_manual_token(args.token)
     jay_wallet_browser = args.jay_wallet_browser or parse_env_bool("JAY_WALLET_BROWSER")
@@ -663,7 +610,7 @@ def main():
         token=manual_token,
         jay_wallet_browser=jay_wallet_browser,
     )
-    
+
     if args.info:
         async def info():
             banner()
@@ -672,10 +619,10 @@ def main():
             log(f"Balance: {miner.balance:.6f} JAY",C.GRN,"💰")
         asyncio.run(info())
         return
-    
+
     signal.signal(signal.SIGINT, lambda s,f: (print(), miner.stop()))
     signal.signal(signal.SIGTERM, lambda s,f: miner.stop())
-    
+
     try:
         asyncio.run(miner.run())
     except KeyboardInterrupt:

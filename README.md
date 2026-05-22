@@ -2,7 +2,7 @@
 
 Unofficial Python CLI miner for **The Jay Network**.
 
-Default mode is **full-auto**: the miner keeps the official mining page open in Camoufox and refreshes `/api/ws-token` automatically in the background, then mines through the CLI/WebSocket client.
+Default mode is **full-auto**: the miner opens the official mining page in Camoufox only when it needs a fresh `/api/ws-token`, closes the browser after the token is acquired, then mines through the CLI/WebSocket client.
 
 A manual token mode is still available via `.env` or `--token` for machines where browser automation is not available.
 
@@ -10,9 +10,9 @@ A manual token mode is still available via `.env` or `--token` for machines wher
 
 ## Features
 
-- Full-auto persistent Camoufox token refresh through browser automation
+- Full-auto on-demand Camoufox token acquisition through browser automation
 - WebSocket mining client for `wss://api-pool.winnode.xyz`
-- Auto reconnect and rate-limit backoff for token refresh
+- Auto reconnect and rate-limit backoff for token acquisition
 - Optional watchdog script for long-running public/server usage
 - Manual token fallback via `.env`, environment variables, or `--token`
 - Wallet balance lookup from the JAY LCD API
