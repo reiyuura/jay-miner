@@ -23,7 +23,9 @@ import os
 import argparse
 import signal
 import subprocess
+import threading
 from datetime import datetime
+from queue import Queue, Empty
 from urllib.parse import urlencode
 
 try:
@@ -51,6 +53,7 @@ SHARE_INTERVAL   = 5.0    # seconds between share submissions (pool min=750ms, u
 MIN_SHARE_GAP    = 2.0    # hard floor: never send shares faster than this (pool bans <750ms)
 PING_INTERVAL    = 30
 BALANCE_INTERVAL = 30
+TOKEN_LIFETIME   = 50   # refresh before short-lived browser token expires
 TOKEN_429_BACKOFF = 900  # /api/ws-token can rate-limit hard; do not retry aggressively
 MAX_RECONNECT    = 50
 RECONNECT_BASE   = 2.0
@@ -115,16 +118,21 @@ def banner():
 """)
 
 # ═══════════════════════════════════════════
-# On-demand Token Manager (Camoufox)
+# Persistent Token Manager (Camoufox)
 # ═══════════════════════════════════════════
 class TokenManager:
-    """Opens Camoufox only when a fresh browser token is needed, then closes it."""
+    """Keeps a Camoufox browser open for automatic token refreshes."""
     
     def __init__(self, session_id=None, device_id=None):
         self.session_id = session_id or gen_id("session_")
         self.device_id = device_id or gen_id("device_")
         self._token_generation = 0
+        self._token_queue = Queue(maxsize=1)
         self._stop = False
+        self._thread = None
+        self._page = None
+        self._browser = None
+        self._ready = threading.Event()
         self._rate_limited_until = 0
         self._last_token_at = 0
         self._consecutive_429 = 0
@@ -142,8 +150,16 @@ class TokenManager:
             time.sleep(1)
     
     def start(self):
-        """No persistent browser is started; token fetch is lazy/on-demand."""
-        return None
+        """Start the persistent browser in a background thread."""
+        try:
+            import camoufox.sync_api  # noqa: F401
+        except ImportError as e:
+            raise SystemExit("Missing dependency: camoufox. Run: pip install -r requirements.txt && python3 -m camoufox fetch") from e
+
+        self._thread = threading.Thread(target=self._browser_loop, daemon=True)
+        self._thread.start()
+        if not self._ready.wait(timeout=90):
+            raise Exception("Camoufox browser failed to start within 90s")
 
     def _fetch_token_from_page(self, page):
         self._token_generation += 1
@@ -179,36 +195,32 @@ class TokenManager:
             "deviceId": self.device_id,
             "tokenGeneration": self._token_generation,
         })
-    
-    def get_token(self, timeout=None):
-        """Fetch a fresh token by briefly opening Camoufox, then closing it.
 
-        When the token endpoint returns HTTP 429, wait through the full
-        Retry-After/backoff window instead of timing out and reconnecting.
-        Reconnecting early creates a fresh browser/token request loop and keeps
-        the endpoint rate-limited.
-        """
-        deadline = (time.time() + timeout) if timeout else None
+    def _put_token(self, token):
+        if self._token_queue.full():
+            try:
+                self._token_queue.get_nowait()
+            except Empty:
+                pass
+        self._token_queue.put(token)
+
+    def _browser_loop(self):
+        """Persistent Camoufox session running in a thread."""
         os.environ['DISPLAY'] = self._display
-        
+        try:
+            from camoufox.sync_api import Camoufox
+        except ImportError:
+            log("Missing dependency: camoufox. Run: pip install camoufox && python3 -m camoufox fetch", C.RED, "❌")
+            return
+
         while not self._stop:
-            rate_limit_remaining = max(0, self._rate_limited_until - time.time())
-            if rate_limit_remaining:
-                log(f"Token endpoint rate-limited. Waiting {int(rate_limit_remaining)}s before retry...", C.YEL, "⏳")
-                time.sleep(rate_limit_remaining)
-
-            if deadline and time.time() >= deadline:
-                break
-
             try:
-                from camoufox.sync_api import Camoufox
-            except ImportError as e:
-                raise SystemExit("Missing dependency: camoufox. Run: pip install camoufox && python3 -m camoufox fetch") from e
-
-            log("Opening Camoufox for token refresh...", C.YEL, "🌐")
-            try:
+                log("Starting persistent Camoufox browser...", C.YEL, "🌐")
                 with Camoufox(headless=False, humanize=True, geoip=False) as browser:
+                    self._browser = browser
                     page = browser.new_page()
+                    self._page = page
+
                     log("Loading mining site...", C.YEL, "🌐")
                     page.goto(MINING_URL, wait_until='domcontentloaded', timeout=60000)
                     page.wait_for_timeout(25000)
@@ -219,37 +231,73 @@ class TokenManager:
                     if 'JAY Mining' not in title:
                         raise Exception(f"Mining site failed to load (got: {title})")
 
-                    result = self._fetch_token_from_page(page)
-                    if result.get('error'):
-                        status = result.get('status')
-                        if status == 429:
-                            wait_for = max(int(result.get('retryAfter') or 0), TOKEN_429_BACKOFF)
-                            self._consecutive_429 += 1
-                            self._rate_limited_until = time.time() + wait_for
-                            log(f"Token endpoint rate-limited (HTTP 429). Backing off {wait_for}s.", C.YEL, "⏳")
-                            continue
-                        self._consecutive_429 = 0
-                        body = (result.get('body') or '').strip().replace('\n', ' ')[:240]
-                        raise Exception(f"HTTP {status}: {body}" if body else f"HTTP {status}")
+                    log("Mining site loaded ✓", C.GRN, "✅")
+                    self._ready.set()
 
-                    token = result.get('token')
-                    if token:
-                        self._rate_limited_until = 0
-                        self._consecutive_429 = 0
-                        self._last_token_at = time.time()
-                        log("Token refreshed; closing Camoufox", C.GRN, "🔓")
-                        return token
-                    raise Exception("No token in /api/ws-token response")
+                    while not self._stop:
+                        rate_limit_remaining = max(0, self._rate_limited_until - time.time())
+                        if rate_limit_remaining:
+                            log(f"Token endpoint rate-limited. Waiting {int(rate_limit_remaining)}s before retry...", C.YEL, "⏳")
+                            time.sleep(rate_limit_remaining)
+                            continue
+
+                        try:
+                            result = self._fetch_token_from_page(page)
+                            if result.get('error'):
+                                status = result.get('status')
+                                if status == 429:
+                                    wait_for = max(int(result.get('retryAfter') or 0), TOKEN_429_BACKOFF)
+                                    self._consecutive_429 += 1
+                                    self._rate_limited_until = time.time() + wait_for
+                                    log(f"Token endpoint rate-limited (HTTP 429). Backing off {wait_for}s.", C.YEL, "⏳")
+                                    continue
+                                self._consecutive_429 = 0
+                                body = (result.get('body') or '').strip().replace('\n', ' ')[:240]
+                                raise Exception(f"HTTP {status}: {body}" if body else f"HTTP {status}")
+
+                            token = result.get('token')
+                            if not token:
+                                raise Exception("No token in /api/ws-token response")
+
+                            self._rate_limited_until = 0
+                            self._consecutive_429 = 0
+                            self._last_token_at = time.time()
+                            self._put_token(token)
+                            log("Token refreshed", C.GRN, "🔓")
+                            time.sleep(TOKEN_LIFETIME)
+                        except Exception as e:
+                            log(f"Token fetch error: {e}; reloading page...", C.RED, "⚠")
+                            try:
+                                page.goto(MINING_URL, wait_until='domcontentloaded', timeout=60000)
+                                page.wait_for_timeout(30000)
+                            except Exception:
+                                break
+                            time.sleep(5)
             except Exception as e:
-                if time.time() >= deadline:
-                    raise
-                log(f"Token fetch error: {e}; retrying...", C.RED, "⚠")
+                if not self._ready.is_set():
+                    self._ready.set()
+                log(f"Browser error: {e}; restarting...", C.RED, "❌")
                 time.sleep(10)
 
-        raise Exception("Token timeout - no token available")
+    def get_token(self, timeout=None):
+        """Get the newest token produced by the persistent browser."""
+        try:
+            return self._token_queue.get(timeout=timeout)
+        except Empty:
+            raise Exception("Token timeout - no token available")
     
     def stop(self):
         self._stop = True
+        try:
+            if self._page:
+                self._page.close()
+        except Exception:
+            pass
+        try:
+            if self._browser:
+                self._browser.close()
+        except Exception:
+            pass
         if self._xvfb:
             self._xvfb.terminate()
 
@@ -464,7 +512,7 @@ class JayMiner:
         if self.manual_token:
             log("Using manual browser token mode",C.YEL,"🖐")
         else:
-            log("Camoufox auto-token mode enabled (browser opens only for token refresh)",C.YEL,"🌐")
+            log("Camoufox auto-token mode enabled (persistent browser refresh)",C.YEL,"🌐")
             self.token_mgr.start()
         
         log("Starting mining...",C.YEL,"⛏")
@@ -636,3 +684,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
