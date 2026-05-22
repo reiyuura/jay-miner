@@ -180,9 +180,15 @@ class TokenManager:
             "tokenGeneration": self._token_generation,
         })
     
-    def get_token(self, timeout=180):
-        """Fetch a fresh token by briefly opening Camoufox, then closing it."""
-        deadline = time.time() + timeout
+    def get_token(self, timeout=None):
+        """Fetch a fresh token by briefly opening Camoufox, then closing it.
+
+        When the token endpoint returns HTTP 429, wait through the full
+        Retry-After/backoff window instead of timing out and reconnecting.
+        Reconnecting early creates a fresh browser/token request loop and keeps
+        the endpoint rate-limited.
+        """
+        deadline = (time.time() + timeout) if timeout else None
         os.environ['DISPLAY'] = self._display
         
         while not self._stop:
@@ -191,7 +197,7 @@ class TokenManager:
                 log(f"Token endpoint rate-limited. Waiting {int(rate_limit_remaining)}s before retry...", C.YEL, "⏳")
                 time.sleep(rate_limit_remaining)
 
-            if time.time() >= deadline:
+            if deadline and time.time() >= deadline:
                 break
 
             try:
@@ -465,7 +471,7 @@ class JayMiner:
         
         while not self._stop and self._reconnects < MAX_RECONNECT:
             try:
-                token = await asyncio.to_thread(self.token_mgr.get_token, timeout=180)
+                token = await asyncio.to_thread(self.token_mgr.get_token, timeout=None)
                 log("Token acquired",C.GRN,"🔓")
                 
                 ws_query = urlencode({
