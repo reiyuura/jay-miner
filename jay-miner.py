@@ -23,9 +23,7 @@ import os
 import argparse
 import signal
 import subprocess
-import threading
 from datetime import datetime
-from queue import Queue, Empty
 from urllib.parse import urlencode
 
 try:
@@ -53,7 +51,6 @@ SHARE_INTERVAL   = 5.0    # seconds between share submissions (pool min=750ms, u
 MIN_SHARE_GAP    = 2.0    # hard floor: never send shares faster than this (pool bans <750ms)
 PING_INTERVAL    = 30
 BALANCE_INTERVAL = 30
-TOKEN_LIFETIME   = 300  # token refresh cadence; avoid /api/ws-token 429 rate limits
 TOKEN_429_BACKOFF = 900  # /api/ws-token can rate-limit hard; do not retry aggressively
 MAX_RECONNECT    = 50
 RECONNECT_BASE   = 2.0
@@ -118,22 +115,16 @@ def banner():
 """)
 
 # ═══════════════════════════════════════════
-# Persistent Token Manager (Camoufox)
+# On-demand Token Manager (Camoufox)
 # ═══════════════════════════════════════════
 class TokenManager:
-    """Keeps a Camoufox browser open for fast token refreshes."""
+    """Opens Camoufox only when a fresh browser token is needed, then closes it."""
     
     def __init__(self, session_id=None, device_id=None):
         self.session_id = session_id or gen_id("session_")
         self.device_id = device_id or gen_id("device_")
         self._token_generation = 0
-        self._token_queue = Queue(maxsize=1)
         self._stop = False
-        self._thread = None
-        self._page = None
-        self._browser = None
-        self._pw = None
-        self._ready = threading.Event()
         self._rate_limited_until = 0
         self._last_token_at = 0
         self._consecutive_429 = 0
@@ -151,152 +142,108 @@ class TokenManager:
             time.sleep(1)
     
     def start(self):
-        """Start the persistent browser in a background thread."""
-        self._thread = threading.Thread(target=self._browser_loop, daemon=True)
-        self._thread.start()
-        # Wait for browser to be ready
-        if not self._ready.wait(timeout=60):
-            raise Exception("Camoufox browser failed to start within 60s")
+        """No persistent browser is started; token fetch is lazy/on-demand."""
+        return None
+
+    def _fetch_token_from_page(self, page):
+        self._token_generation += 1
+        return page.evaluate('''async ({sessionId, deviceId, tokenGeneration}) => {
+            const ua = navigator.userAgent;
+            const screenInfo = `${screen.width}x${screen.height}x${screen.colorDepth}`;
+            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+            const language = navigator.language || "en-US";
+            const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+            const fingerprint = btoa([ua, screenInfo, tz, language].join("|")).slice(0, 64);
+            const r = await fetch("/api/ws-token", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-Client-Fingerprint": fingerprint,
+                    "X-Token-Generation": String(tokenGeneration),
+                    "X-Request-ID": requestId,
+                    "X-Session-ID": sessionId,
+                    "X-Device-ID": deviceId,
+                    "X-Client-UA": btoa(ua).slice(0, 32),
+                    "X-Client-Screen": btoa(screenInfo).slice(0, 16),
+                    "X-Client-TZ": btoa(tz).slice(0, 16),
+                },
+            });
+            const retryAfter = parseInt(r.headers.get("Retry-After") || "0", 10);
+            if (!r.ok) {
+                const text = await r.text().catch(() => "");
+                return {error: true, status: r.status, retryAfter, body: text.slice(0, 240)};
+            }
+            return await r.json();
+        }''', {
+            "sessionId": self.session_id,
+            "deviceId": self.device_id,
+            "tokenGeneration": self._token_generation,
+        })
     
-    def _browser_loop(self):
-        """Persistent Camoufox session running in a thread."""
+    def get_token(self, timeout=180):
+        """Fetch a fresh token by briefly opening Camoufox, then closing it."""
+        deadline = time.time() + timeout
         os.environ['DISPLAY'] = self._display
         
-        from camoufox.sync_api import Camoufox
-        
         while not self._stop:
+            rate_limit_remaining = max(0, self._rate_limited_until - time.time())
+            if rate_limit_remaining:
+                log(f"Token endpoint rate-limited. Waiting {int(rate_limit_remaining)}s before retry...", C.YEL, "⏳")
+                time.sleep(rate_limit_remaining)
+
+            if time.time() >= deadline:
+                break
+
+            try:
+                from camoufox.sync_api import Camoufox
+            except ImportError as e:
+                raise SystemExit("Missing dependency: camoufox. Run: pip install camoufox && python3 -m camoufox fetch") from e
+
+            log("Opening Camoufox for token refresh...", C.YEL, "🌐")
             try:
                 with Camoufox(headless=False, humanize=True, geoip=False) as browser:
-                    self._browser = browser
                     page = browser.new_page()
-                    self._page = page
-                    
-                    # Initial load
                     log("Loading mining site...", C.YEL, "🌐")
                     page.goto(MINING_URL, wait_until='domcontentloaded', timeout=60000)
                     page.wait_for_timeout(25000)
-                    
                     title = page.title()
                     if 'JAY Mining' not in title:
                         page.wait_for_timeout(15000)
                         title = page.title()
-                    
-                    if 'JAY Mining' in title:
-                        log("Mining site loaded ✓", C.GRN, "✅")
-                        self._ready.set()
-                        
-                        # Token refresh loop
-                        while not self._stop:
-                            try:
-                                self._token_generation += 1
-                                result = page.evaluate('''async ({sessionId, deviceId, tokenGeneration}) => {
-                                    const ua = navigator.userAgent;
-                                    const screenInfo = `${screen.width}x${screen.height}x${screen.colorDepth}`;
-                                    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-                                    const language = navigator.language || "en-US";
-                                    const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-                                    const fingerprint = btoa([ua, screenInfo, tz, language].join("|")).slice(0, 64);
-                                    const r = await fetch("/api/ws-token", {
-                                        method: "POST",
-                                        headers: {
-                                            "Content-Type": "application/json",
-                                            "X-Client-Fingerprint": fingerprint,
-                                            "X-Token-Generation": String(tokenGeneration),
-                                            "X-Request-ID": requestId,
-                                            "X-Session-ID": sessionId,
-                                            "X-Device-ID": deviceId,
-                                            "X-Client-UA": btoa(ua).slice(0, 32),
-                                            "X-Client-Screen": btoa(screenInfo).slice(0, 16),
-                                            "X-Client-TZ": btoa(tz).slice(0, 16),
-                                        },
-                                    });
-                                    const retryAfter = parseInt(r.headers.get("Retry-After") || "0", 10);
-                                    if (!r.ok) {
-                                        const text = await r.text().catch(() => "");
-                                        return {error: true, status: r.status, retryAfter, body: text.slice(0, 240)};
-                                    }
-                                    return await r.json();
-                                }''', {
-                                    "sessionId": self.session_id,
-                                    "deviceId": self.device_id,
-                                    "tokenGeneration": self._token_generation,
-                                })
+                    if 'JAY Mining' not in title:
+                        raise Exception(f"Mining site failed to load (got: {title})")
 
-                                if result.get('error'):
-                                    status = result.get('status')
-                                    if status == 429:
-                                        wait_for = max(int(result.get('retryAfter') or 0), TOKEN_429_BACKOFF)
-                                        self._consecutive_429 += 1
-                                        self._rate_limited_until = time.time() + wait_for
-                                        log(f"Token endpoint rate-limited (HTTP 429). Backing off {wait_for}s. ({self._consecutive_429}/3)", C.YEL, "⏳")
-                                        if self._consecutive_429 >= 3:
-                                            log("Repeated token rate limits; restarting browser session.", C.YEL, "🔄")
-                                            self._rate_limited_until = 0
-                                            self._consecutive_429 = 0
-                                            break
-                                        time.sleep(wait_for)
-                                        continue
-                                    self._consecutive_429 = 0
-                                    body = (result.get('body') or '').strip().replace('\n', ' ')[:240]
-                                    raise Exception(f"HTTP {status}: {body}" if body else f"HTTP {status}")
+                    result = self._fetch_token_from_page(page)
+                    if result.get('error'):
+                        status = result.get('status')
+                        if status == 429:
+                            wait_for = max(int(result.get('retryAfter') or 0), TOKEN_429_BACKOFF)
+                            self._consecutive_429 += 1
+                            self._rate_limited_until = time.time() + wait_for
+                            log(f"Token endpoint rate-limited (HTTP 429). Backing off {wait_for}s.", C.YEL, "⏳")
+                            continue
+                        self._consecutive_429 = 0
+                        body = (result.get('body') or '').strip().replace('\n', ' ')[:240]
+                        raise Exception(f"HTTP {status}: {body}" if body else f"HTTP {status}")
 
-                                token = result.get('token')
-                                if token:
-                                    self._rate_limited_until = 0
-                                    self._consecutive_429 = 0
-                                    self._last_token_at = time.time()
-                                    # Put token, replacing old one if not consumed
-                                    if self._token_queue.full():
-                                        try: self._token_queue.get_nowait()
-                                        except: pass
-                                    self._token_queue.put(token)
-
-                                time.sleep(TOKEN_LIFETIME)
-
-                            except Exception as e:
-                                log(f"Token fetch error: {e}", C.RED, "⚠")
-                                # Page might have navigated away or lost session; reload only for non-rate-limit errors.
-                                try:
-                                    page.goto(MINING_URL, wait_until='domcontentloaded', timeout=60000)
-                                    page.wait_for_timeout(30000)
-                                except:
-                                    break  # restart browser
-                                time.sleep(60)
-                    else:
-                        log(f"Mining site failed to load (got: {title})", C.RED, "❌")
-                        time.sleep(10)
-                        
+                    token = result.get('token')
+                    if token:
+                        self._rate_limited_until = 0
+                        self._consecutive_429 = 0
+                        self._last_token_at = time.time()
+                        log("Token refreshed; closing Camoufox", C.GRN, "🔓")
+                        return token
+                    raise Exception("No token in /api/ws-token response")
             except Exception as e:
-                log(f"Browser error: {e}", C.RED, "❌")
+                if time.time() >= deadline:
+                    raise
+                log(f"Token fetch error: {e}; retrying...", C.RED, "⚠")
                 time.sleep(10)
-    
-    def get_token(self, timeout=60):
-        """Get a fresh token (blocks until available)."""
-        deadline = time.time() + timeout
-        while not self._stop:
-            wait_timeout = max(1, deadline - time.time())
-            rate_limit_remaining = max(0, self._rate_limited_until - time.time())
-            if rate_limit_remaining:
-                # The browser token loop is intentionally sleeping to honor HTTP 429.
-                # Keep the miner waiting instead of producing a reconnect error every 60s.
-                wait_timeout = max(wait_timeout, rate_limit_remaining + 30)
-            try:
-                return self._token_queue.get(timeout=wait_timeout)
-            except Empty:
-                if time.time() >= self._rate_limited_until:
-                    break
+
         raise Exception("Token timeout - no token available")
     
     def stop(self):
         self._stop = True
-        try:
-            if self._page:
-                self._page.close()
-        except: pass
-        try:
-            if self._browser:
-                self._browser.close()
-        except: pass
         if self._xvfb:
             self._xvfb.terminate()
 
@@ -511,14 +458,14 @@ class JayMiner:
         if self.manual_token:
             log("Using manual browser token mode",C.YEL,"🖐")
         else:
-            log("Starting persistent Camoufox browser...",C.YEL,"🌐")
+            log("Camoufox auto-token mode enabled (browser opens only for token refresh)",C.YEL,"🌐")
             self.token_mgr.start()
         
         log("Starting mining...",C.YEL,"⛏")
         
         while not self._stop and self._reconnects < MAX_RECONNECT:
             try:
-                token = self.token_mgr.get_token(timeout=60)
+                token = await asyncio.to_thread(self.token_mgr.get_token, timeout=180)
                 log("Token acquired",C.GRN,"🔓")
                 
                 ws_query = urlencode({
