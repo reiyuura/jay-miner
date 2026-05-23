@@ -24,6 +24,8 @@ import signal
 import subprocess
 from datetime import datetime
 from urllib.parse import urlencode
+import logging
+from logging.handlers import RotatingFileHandler
 
 try:
     import websockets
@@ -43,7 +45,7 @@ POOL_WS_URL   = "wss://api-pool.winnode.xyz"
 POOL_API_URL  = "https://api-pool.winnode.xyz"
 CHAIN_API_URL = "https://api-jayn.winnode.xyz"
 MINING_URL    = "https://mining.thejaynetwork.com"
-VERSION       = "1.3.0"
+VERSION       = "1.4.0"
 
 DEFAULT_THREADS  = 4
 SHARE_INTERVAL   = 5.0    # seconds between share submissions (pool min=750ms, use generous gap)
@@ -66,8 +68,56 @@ def gen_id(p=""):
 def gen_hex64(): return ''.join(random.choices('0123456789abcdef',k=64))
 def gen_nonce(): return random.randint(0,999999)
 def ts(): return datetime.now().strftime("%H:%M:%S")
+def _setup_file_logger(log_dir=None):
+    """Set up a rotating file logger that captures all miner output."""
+    log_dir = log_dir or os.path.join(SCRIPT_DIR, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "miner.log")
+    fh = RotatingFileHandler(log_path, maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
+    fh.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S"))
+    fh.setLevel(logging.DEBUG)
+    logger = logging.getLogger("jay-miner")
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(fh)
+    return logger
+
+_file_logger = None
+
 def log(msg,c=C.WHT,i=""):
-    print(f"{C.D}[{ts()}]{C.R} {f'{i} ' if i else ''}{c}{msg}{C.R}",flush=True)
+    prefix = f"{i} " if i else ""
+    print(f"{C.D}[{ts()}]{C.R} {prefix}{c}{msg}{C.R}",flush=True)
+    if _file_logger:
+        # Strip ANSI codes for file
+        import re as _re
+        clean = _re.sub(r'\033\[[0-9;]*m', '', f"{prefix}{msg}")
+        _file_logger.debug(clean)
+
+
+def short_id(value, head=8):
+    if not value:
+        return "-"
+    value = str(value)
+    return value if len(value) <= head else f"{value[:head]}..."
+
+
+def format_wait(seconds):
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def payload_summary(payload, limit=160):
+    try:
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        text = str(payload)
+    text = text.replace("\n", " ")
+    return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -194,7 +244,7 @@ class TokenManager:
         while not self._stop:
             rate_limit_remaining = max(0, self._rate_limited_until - time.time())
             if rate_limit_remaining:
-                log(f"Token endpoint rate-limited. Waiting {int(rate_limit_remaining)}s before retry...", C.YEL, "⏳")
+                log(f"Token endpoint rate-limited. Waiting {format_wait(rate_limit_remaining)} before retry...", C.YEL, "⏳")
                 time.sleep(rate_limit_remaining)
 
             if time.time() >= deadline:
@@ -209,16 +259,18 @@ class TokenManager:
             try:
                 with Camoufox(headless=False, humanize=True, geoip=False) as browser:
                     page = browser.new_page()
-                    log("Loading mining site...", C.YEL, "🌐")
+                    log(f"Loading mining site: {MINING_URL}", C.YEL, "🌐")
                     page.goto(MINING_URL, wait_until='domcontentloaded', timeout=60000)
                     page.wait_for_timeout(25000)
                     title = page.title()
                     if 'JAY Mining' not in title:
+                        log(f"Page title after first load: {title!r}; waiting a bit longer...", C.YEL, "🧭")
                         page.wait_for_timeout(15000)
                         title = page.title()
                     if 'JAY Mining' not in title:
-                        raise Exception(f"Mining site failed to load (got: {title})")
+                        raise Exception(f"Mining site failed to load (got title: {title!r})")
 
+                    log(f"Mining page ready (title: {title!r}); requesting websocket token...", C.CYN, "🪪")
                     result = self._fetch_token_from_page(page)
                     if result.get('error'):
                         status = result.get('status')
@@ -226,7 +278,7 @@ class TokenManager:
                             wait_for = max(int(result.get('retryAfter') or 0), TOKEN_429_BACKOFF)
                             self._consecutive_429 += 1
                             self._rate_limited_until = time.time() + wait_for
-                            log(f"Token endpoint rate-limited (HTTP 429). Backing off {wait_for}s.", C.YEL, "⏳")
+                            log(f"Token endpoint rate-limited (HTTP 429). Backing off {format_wait(wait_for)}.", C.YEL, "⏳")
                             continue
                         self._consecutive_429 = 0
                         body = (result.get('body') or '').strip().replace('\n', ' ')[:240]
@@ -237,7 +289,7 @@ class TokenManager:
                         self._rate_limited_until = 0
                         self._consecutive_429 = 0
                         self._last_token_at = time.time()
-                        log("Token refreshed; closing Camoufox", C.GRN, "🔓")
+                        log(f"Token refreshed; closing Camoufox (session={short_id(self.session_id)}, device={short_id(self.device_id)})", C.GRN, "🔓")
                         return token
                     raise Exception("No token in /api/ws-token response")
             except Exception as e:
@@ -256,10 +308,11 @@ class TokenManager:
 # Miner
 # ═══════════════════════════════════════════
 class JayMiner:
-    def __init__(self, wallet, threads=DEFAULT_THREADS, verbose=False, jay_wallet_browser=False):
+    def __init__(self, wallet, threads=DEFAULT_THREADS, verbose=False, jay_wallet_browser=False, debug=False):
         self.wallet = wallet
         self.threads = threads
         self.verbose = verbose
+        self.debug = debug
         self.jay_wallet_browser = bool(jay_wallet_browser)
         self.session_id = gen_id("session_")
         self.device_id = gen_id("device_")
@@ -290,45 +343,114 @@ class JayMiner:
                         u = next((b for b in d.get("balances",[]) if b.get("denom")=="ujay"),None)
                         if u: self.balance = int(u["amount"])/1e6
         except Exception as e:
-            if self.verbose: log(f"Balance err: {e}",C.YEL,"⚠")
+            if self.verbose: log(f"Balance check failed: {type(e).__name__}: {e}",C.YEL,"⚠")
 
     def _handle(self, data):
         t = data.get("type","")
         p = data.get("payload",{})
 
+        # Log raw message to file when debug
+        if self.debug and _file_logger:
+            _file_logger.debug(f"RAW [{t}]: {json.dumps(data, ensure_ascii=False)[:500]}")
+
         if t == "job":
             self.current_job_id = p.get("jobId","")
-            if self.verbose: log(f"Job: {self.current_job_id[:16]}...",C.CYN,"📋")
+            if self.verbose:
+                diff = p.get("difficulty", "?")
+                target = p.get("target", "?")
+                log(f"New job {short_id(self.current_job_id, 16)} | difficulty={diff} | target={target}",C.CYN,"📋")
         elif t in ("auth_success","mining_started"):
             if p.get("minerId"): self.miner_id = p["minerId"]
+            diff = p.get("difficulty") or "?"
+            target = p.get("target") or "?"
+            height = p.get("networkHeight") or "?"
             self.mining = True
-            log(f"Mining! Miner: {self.miner_id or '?'}",C.GRN,"✅")
+            log(f"Mining active | miner={self.miner_id or '?'} | diff={diff} | target={target} | height={height}",C.GRN,"✅")
         elif t == "new_work":
-            if self.verbose: log(f"New work",C.CYN,"📋")
+            if self.verbose:
+                height = p.get("networkHeight") or p.get("height") or p.get("blockHeight") or "?"
+                job_id = p.get("jobId") or self.current_job_id or "?"
+                diff = p.get("difficulty") or "?"
+                target = p.get("target") or "?"
+                chain = p.get("chainId") or ""
+                chain_extra = f" | chain={chain}" if chain else ""
+                log(f"New work | job={short_id(job_id, 12)} | height={height} | diff={diff} | target={target}{chain_extra}",C.CYN,"📋")
         elif t == "share_accepted":
             self.shares_accepted += 1
-            log(f"Share ✓ ({self.shares_accepted})",C.GRN,"✓")
+            pool_shares = p.get("shares") or p.get("acceptedShares") or self.shares_accepted
+            total_pool = p.get("totalPoolShares") or p.get("totalShares") or ""
+            diff = p.get("difficulty") or ""
+            miners = p.get("poolMiners") or ""
+            extra = f" | pool={pool_shares}"
+            if total_pool: extra += f" | total_pool={total_pool}"
+            if diff: extra += f" | diff={diff}"
+            if miners: extra += f" | pool_miners={miners}"
+            log(f"Share #{self.shares_accepted} accepted{extra}",C.GRN,"✓")
         elif t == "share_rejected":
             self.shares_rejected += 1
-            log(f"Share ✗",C.RED,"✗")
+            reason = p.get("reason") or p.get("message") or payload_summary(p)
+            log(f"Share rejected ({self.shares_rejected}) | reason: {reason}",C.RED,"✗")
         elif t == "block_found":
             self.blocks_found += 1
-            log(f"BLOCK FOUND! 🎉",C.YEL+C.B,"🌟")
+            log(f"Block found! count={self.blocks_found} | payload={payload_summary(p)}",C.YEL+C.B,"🌟")
         elif t == "mining_reward":
             a = p.get("amount",0)
             self.total_earned += a
-            log(f"Reward +{a:.6f} JAY ({p.get('shares',0)} shares) TX:{p.get('txHash','')[:16]}...",C.GRN+C.B,"💰")
+            tx_hash = p.get('txHash','')
+            shares = p.get("shares") or p.get("totalShares") or p.get("count") or "?"
+            pending = p.get("pendingBalance") or p.get("balance") or ""
+            reward_extra = f" | pending={pending}" if pending else ""
+            log(f"Reward +{a:.6f} JAY | shares={shares} | earned_total={self.total_earned:.6f}{reward_extra} | tx={short_id(tx_hash, 16)}",C.GRN+C.B,"💰")
         elif t == "payout":
-            log(f"Payout {p.get('amount',0):.6f} JAY!",C.GRN+C.B,"💵")
+            tx_hash = p.get('txHash','')
+            log(f"Payout {p.get('amount',0):.6f} JAY | tx={short_id(tx_hash, 16)}",C.GRN+C.B,"💵")
         elif t == "pool_stats":
             if self.verbose:
                 pl = p.get("pool",{})
-                log(f"Pool: {pl.get('hashrate','?')} | Miners: {pl.get('miners','?')}",C.CYN,"📊")
+                # Pool may send stats nested in "pool" or at top level
+                if not isinstance(pl, dict) or not pl:
+                    pl = p
+                def _v(d, *keys):
+                    for k in keys:
+                        v = d.get(k)
+                        if v is not None:
+                            return v
+                    return "?"
+                hr = _v(pl, "totalHashrate", "hashrate", "poolHashrate")
+                miners = _v(pl, "miners", "poolMiners", "activeMiners")
+                blocks = _v(pl, "blocksFound", "blocks")
+                eff = _v(pl, "efficiency")
+                uptime_raw = _v(pl, "uptime")
+                # Format uptime nicely (it's in seconds)
+                if isinstance(uptime_raw, (int, float)) and uptime_raw > 60:
+                    uptime = format_wait(uptime_raw)
+                else:
+                    uptime = uptime_raw
+                # Format hashrate nicely
+                if isinstance(hr, (int, float)):
+                    if hr > 1000:
+                        hr_str = f"{hr/1000:.1f} kH/s"
+                    else:
+                        hr_str = f"{hr:.0f} H/s"
+                else:
+                    hr_str = str(hr)
+                log(f"Pool stats | hashrate={hr_str} | miners={miners} | blocks_found={blocks} | efficiency={eff}% | uptime={uptime}",C.CYN,"📊")
+                if self.debug:
+                    log(f"  pool_stats raw keys: {list(p.keys())} | pool keys: {list(pl.keys()) if isinstance(pl,dict) else 'N/A'}",C.D,"🔍")
+        elif t == "network_block":
+            if self.verbose:
+                height = p.get("height") or p.get("blockHeight") or "?"
+                block_hash = p.get("hash") or p.get("blockHash") or ""
+                ts_block = p.get("timestamp") or p.get("time") or ""
+                extra = f" | ts={ts_block}" if ts_block else ""
+                log(f"Network block #{height} | hash={short_id(block_hash, 16)}{extra}",C.D,"🧱")
         elif t == "pong":
             pass
         elif t == "error":
             msg = p.get('message','?')
-            log(f"Pool err: {msg}",C.RED,"❌")
+            code = p.get('code') or p.get('errorCode') or ""
+            code_extra = f" | code={code}" if code else ""
+            log(f"Pool error: {msg}{code_extra} | payload={payload_summary(p)}",C.RED,"❌")
             # Detect ban and extract wait time
             if "banned" in msg.lower():
                 import re
@@ -338,7 +460,8 @@ class JayMiner:
                     log(f"Wallet BANNED. Waiting {hrs.group(1)}h...",C.RED,"🚫")
                     self._ban_until = time.time() + wait_s
         else:
-            if self.verbose: log(f"Msg: {t}",C.D,"📨")
+            if self.verbose or self.debug:
+                log(f"Unhandled msg type={t} | keys={list(p.keys()) if isinstance(p,dict) else '?'} | payload={payload_summary(p)}",C.D,"📨")
 
     async def _send(self, t, p):
         try:
@@ -358,11 +481,11 @@ class JayMiner:
             await asyncio.sleep(1)
 
         if not self.mining:
-            log("Mining not started (no auth_success). Skipping share loop.", C.YEL, "⚠")
+            log("Mining not started within 60s after connect; skipping share loop until next reconnect.", C.YEL, "⚠")
             return
 
         # Initial delay after connect to avoid "spam" detection
-        log(f"Waiting {INITIAL_DELAY:.0f}s before first share...", C.D, "⏳")
+        log(f"Waiting {INITIAL_DELAY:.0f}s before first share submission...", C.D, "⏳")
         await asyncio.sleep(INITIAL_DELAY)
 
         prob = min(0.15 + self.threads * 0.02, 0.5)
@@ -372,7 +495,7 @@ class JayMiner:
                 # Skip shares if wallet is banned
                 if time.time() < self._ban_until:
                     remain = int(self._ban_until - time.time())
-                    log(f"Banned, waiting {remain//3600}h{(remain%3600)//60}m...",C.RED,"🚫")
+                    log(f"Wallet banned by pool; waiting {format_wait(remain)} before resuming shares...",C.RED,"🚫")
                     await asyncio.sleep(min(remain, 300))
                     continue
                 self.hashrate = self.threads * 15 + random.uniform(-5, 5)
@@ -422,8 +545,10 @@ class JayMiner:
                 if self.start_time:
                     e=time.time()-self.start_time
                     h,m=int(e//3600),int((e%3600)//60)
-                    log(f"⏱ {h}h{m}m | Shares:{C.GRN}{self.shares_accepted}{C.R}✓/{C.RED}{self.shares_rejected}{C.R}✗ | "
-                        f"HR:{self.hashrate:.0f}H/s | Earned:{C.GRN}{self.total_earned:.6f}{C.R} | Bal:{C.CYN}{self.balance:.6f}{C.R}",
+                    mins = e / 60
+                    rate = self.shares_accepted / mins if mins > 0 else 0
+                    log(f"⏱ {h}h{m}m | shares={self.shares_accepted}✓/{self.shares_rejected}✗ | "
+                        f"rate={rate:.1f}/min | HR≈{self.hashrate:.0f}H/s | earned={self.total_earned:.6f} JAY | bal={self.balance:.6f} JAY",
                         C.WHT,"📊")
             except asyncio.CancelledError: break
             except: break
@@ -433,6 +558,8 @@ class JayMiner:
         banner()
         log(f"Wallet: {self.wallet}",C.CYN,"👛")
         log(f"Threads: {self.threads}",C.CYN,"🧵")
+        log(f"Session ID: {self.session_id}",C.CYN,"🆔")
+        log(f"Device ID: {self.device_id}",C.CYN,"🖥️")
         if self.jay_wallet_browser:
             log("JAY Wallet browser flag: enabled",C.CYN,"🚀")
 
@@ -441,14 +568,15 @@ class JayMiner:
 
         print()
         log("Camoufox auto-token mode enabled (browser opens only when a token is needed)",C.YEL,"🌐")
+        log(f"Token source: {MINING_URL}/api/ws-token", C.YEL, "🪪")
         self.token_mgr.start()
 
-        log("Starting mining...",C.YEL,"⛏")
+        log(f"Starting mining loop against {POOL_WS_URL}",C.YEL,"⛏")
 
         while not self._stop and self._reconnects < MAX_RECONNECT:
             try:
                 token = await asyncio.to_thread(self.token_mgr.get_token, timeout=1800)
-                log("Token acquired",C.GRN,"🔓")
+                log(f"Token acquired; connecting websocket with session={short_id(self.session_id)} device={short_id(self.device_id)}",C.GRN,"🔓")
 
                 ws_query = urlencode({
                     "token": token,
@@ -475,7 +603,7 @@ class JayMiner:
                     self.connected = True
                     self._reconnects = 0
 
-                    log("Connected!",C.GRN,"✅")
+                    log(f"Connected to pool websocket | session={short_id(self.session_id)} | device={short_id(self.device_id)}",C.GRN,"✅")
 
                     # Small delay before sending commands
                     await asyncio.sleep(1)
@@ -567,10 +695,14 @@ def main():
     load_dotenv(os.path.join(SCRIPT_DIR, ".env"))
     load_dotenv(os.path.join(os.getcwd(), ".env"))
 
+    global _file_logger
+    _file_logger = _setup_file_logger()
+
     p = argparse.ArgumentParser(description="JAY Network CLI Miner",epilog="Pool: wss://api-pool.winnode.xyz")
     p.add_argument("--wallet","-w",required=True,help="JAY wallet (yjay1...)")
     p.add_argument("--threads","-t",type=int,default=DEFAULT_THREADS,help=f"Threads (default:{DEFAULT_THREADS})")
     p.add_argument("--verbose","-v",action="store_true")
+    p.add_argument("--debug","-d",action="store_true",help="Show raw payload keys for all messages")
     p.add_argument("--jay-wallet-browser",action="store_true",help="Send isJayWalletBrowser=true in the pool start_mining payload; can also be enabled with JAY_WALLET_BROWSER=1")
     p.add_argument("--info","-i",action="store_true",help="Show info and exit")
     p.add_argument("--version",action="version",version=f"JAY Network CLI Miner {VERSION}")
@@ -585,6 +717,7 @@ def main():
         max(1,min(args.threads,32)),
         args.verbose,
         jay_wallet_browser=jay_wallet_browser,
+        debug=args.debug,
     )
 
     if args.info:
