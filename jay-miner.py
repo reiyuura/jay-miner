@@ -45,7 +45,7 @@ POOL_WS_URL   = "wss://api-pool.winnode.xyz"
 POOL_API_URL  = "https://api-pool.winnode.xyz"
 CHAIN_API_URL = "https://api-jayn.winnode.xyz"
 MINING_URL    = "https://mining.thejaynetwork.com"
-VERSION       = "1.4.0"
+VERSION       = "1.5.0"
 
 DEFAULT_THREADS  = 4
 SHARE_INTERVAL   = 5.0    # seconds between share submissions (pool min=750ms, use generous gap)
@@ -237,9 +237,8 @@ class TokenManager:
         })
 
     def get_token(self, timeout=180):
-        """Fetch a fresh token by briefly opening Camoufox, then closing it."""
+        """Fetch a fresh token by running Camoufox in a separate subprocess."""
         deadline = time.time() + timeout
-        os.environ['DISPLAY'] = self._display
 
         while not self._stop:
             rate_limit_remaining = max(0, self._rate_limited_until - time.time())
@@ -250,48 +249,41 @@ class TokenManager:
             if time.time() >= deadline:
                 break
 
+            log("Fetching token via subprocess (Camoufox)...", C.YEL, "🌐")
             try:
-                from camoufox.sync_api import Camoufox
-            except ImportError as e:
-                raise SystemExit("Missing dependency: camoufox. Run: pip install camoufox && python3 -m camoufox fetch") from e
+                result = subprocess.run(
+                    [sys.executable, os.path.join(SCRIPT_DIR, "fetch_token.py"),
+                     self.session_id, self.device_id],
+                    capture_output=True, text=True, timeout=120,
+                    env={**os.environ, "DISPLAY": self._display},
+                )
+                if result.returncode != 0:
+                    err = (result.stderr or result.stdout or "").strip()[-200:]
+                    raise Exception(f"fetch_token.py failed (rc={result.returncode}): {err}")
 
-            log("Opening Camoufox for token refresh...", C.YEL, "🌐")
-            try:
-                with Camoufox(headless=False, humanize=True, geoip=False) as browser:
-                    page = browser.new_page()
-                    log(f"Loading mining site: {MINING_URL}", C.YEL, "🌐")
-                    page.goto(MINING_URL, wait_until='domcontentloaded', timeout=60000)
-                    page.wait_for_timeout(25000)
-                    title = page.title()
-                    if 'JAY Mining' not in title:
-                        log(f"Page title after first load: {title!r}; waiting a bit longer...", C.YEL, "🧭")
-                        page.wait_for_timeout(15000)
-                        title = page.title()
-                    if 'JAY Mining' not in title:
-                        raise Exception(f"Mining site failed to load (got title: {title!r})")
+                raw = result.stdout.strip().split("\n")[-1]  # last line = JSON
+                data = json.loads(raw)
 
-                    log(f"Mining page ready (title: {title!r}); requesting websocket token...", C.CYN, "🪪")
-                    result = self._fetch_token_from_page(page)
-                    if result.get('error'):
-                        status = result.get('status')
-                        if status == 429:
-                            wait_for = max(int(result.get('retryAfter') or 0), TOKEN_429_BACKOFF)
-                            self._consecutive_429 += 1
-                            self._rate_limited_until = time.time() + wait_for
-                            log(f"Token endpoint rate-limited (HTTP 429). Backing off {format_wait(wait_for)}.", C.YEL, "⏳")
-                            continue
-                        self._consecutive_429 = 0
-                        body = (result.get('body') or '').strip().replace('\n', ' ')[:240]
-                        raise Exception(f"HTTP {status}: {body}" if body else f"HTTP {status}")
+                if data.get("error"):
+                    status = data.get("status")
+                    if status == 429:
+                        wait_for = TOKEN_429_BACKOFF
+                        self._rate_limited_until = time.time() + wait_for
+                        log(f"Token endpoint rate-limited (HTTP 429). Backing off {format_wait(wait_for)}.", C.YEL, "⏳")
+                        continue
+                    raise Exception(f"HTTP {status}: {data.get('body','')}")
 
-                    token = result.get('token')
-                    if token:
-                        self._rate_limited_until = 0
-                        self._consecutive_429 = 0
-                        self._last_token_at = time.time()
-                        log(f"Token refreshed; closing Camoufox (session={short_id(self.session_id)}, device={short_id(self.device_id)})", C.GRN, "🔓")
-                        return token
-                    raise Exception("No token in /api/ws-token response")
+                token = data.get("token")
+                if token:
+                    self._rate_limited_until = 0
+                    self._last_token_at = time.time()
+                    log(f"Token refreshed via subprocess (session={short_id(self.session_id)})", C.GRN, "🔓")
+                    return token
+                raise Exception(f"No token in response: {raw[:200]}")
+
+            except subprocess.TimeoutExpired:
+                log("Token fetch subprocess timed out (120s); retrying...", C.RED, "⚠")
+                time.sleep(10)
             except Exception as e:
                 if time.time() >= deadline:
                     raise
