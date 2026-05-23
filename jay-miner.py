@@ -2,8 +2,7 @@
 """
 JAY Network CLI Miner v2
 ========================
-CLI mining client for The Jay Network with full-auto Camoufox token management
-and manual `.env` token fallback.
+CLI mining client for The Jay Network with full-auto Camoufox token management.
 
 Usage:
     python3 jay-miner.py --wallet yjay1abc...xyz
@@ -44,7 +43,7 @@ POOL_WS_URL   = "wss://api-pool.winnode.xyz"
 POOL_API_URL  = "https://api-pool.winnode.xyz"
 CHAIN_API_URL = "https://api-jayn.winnode.xyz"
 MINING_URL    = "https://mining.thejaynetwork.com"
-VERSION       = "1.2.0"
+VERSION       = "1.3.0"
 
 DEFAULT_THREADS  = 4
 SHARE_INTERVAL   = 5.0    # seconds between share submissions (pool min=750ms, use generous gap)
@@ -96,10 +95,6 @@ def load_dotenv(path):
         pass
 
 
-def resolve_manual_token(cli_token=None):
-    return (cli_token or os.getenv("JAY_MINING_TOKEN") or os.getenv("JAY_WS_TOKEN") or os.getenv("JAY_TOKEN") or "").strip()
-
-
 def parse_env_bool(name, default=False):
     value = os.getenv(name)
     if value is None:
@@ -116,10 +111,10 @@ def banner():
 """)
 
 # ═══════════════════════════════════════════
-# On-demand Token Manager (Camoufox)
+# Full-auto Token Manager (Camoufox)
 # ═══════════════════════════════════════════
 class TokenManager:
-    """Opens Camoufox only when a fresh browser token is needed, then closes it."""
+    """Opens Camoufox when a fresh browser token is needed, then closes it."""
 
     def __init__(self, session_id=None, device_id=None):
         self.session_id = session_id or gen_id("session_")
@@ -135,15 +130,25 @@ class TokenManager:
 
     def _ensure_xvfb(self):
         try:
-            subprocess.run(['xdpyinfo','-display',self._display],capture_output=True,timeout=2)
-        except:
-            self._xvfb = subprocess.Popen(
-                ['Xvfb',self._display,'-screen','0','1920x1080x24'],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1)
+            probe = subprocess.run(
+                ['xdpyinfo', '-display', self._display],
+                capture_output=True,
+                timeout=2,
+            )
+            if probe.returncode == 0:
+                return
+        except Exception:
+            pass
+
+        self._xvfb = subprocess.Popen(
+            ['Xvfb', self._display, '-screen', '0', '1920x1080x24'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1)
 
     def start(self):
-        """No persistent browser is started; token fetch is lazy/on-demand."""
+        """Token fetch is lazy/on-demand; no persistent browser is started here."""
         return None
 
     def _fetch_token_from_page(self, page):
@@ -247,35 +252,14 @@ class TokenManager:
         self._stop = True
         if self._xvfb:
             self._xvfb.terminate()
-
-
-class ManualTokenManager:
-    """Simple token provider for manual/browser-supplied tokens."""
-
-    def __init__(self, token: str):
-        self.token = (token or "").strip()
-
-    def start(self):
-        return None
-
-    def get_token(self, timeout=60):
-        if not self.token:
-            raise Exception("Manual token missing. Put JAY_MINING_TOKEN in .env or pass --token.")
-        return self.token
-
-    def stop(self):
-        return None
-
-
 # ═══════════════════════════════════════════
 # Miner
 # ═══════════════════════════════════════════
 class JayMiner:
-    def __init__(self, wallet, threads=DEFAULT_THREADS, verbose=False, token=None, jay_wallet_browser=False):
+    def __init__(self, wallet, threads=DEFAULT_THREADS, verbose=False, jay_wallet_browser=False):
         self.wallet = wallet
         self.threads = threads
         self.verbose = verbose
-        self.manual_token = token.strip() if token else None
         self.jay_wallet_browser = bool(jay_wallet_browser)
         self.session_id = gen_id("session_")
         self.device_id = gen_id("device_")
@@ -294,7 +278,7 @@ class JayMiner:
         self._stop = False
         self._reconnects = 0
         self._ban_until = 0
-        self.token_mgr = ManualTokenManager(self.manual_token) if self.manual_token else TokenManager(self.session_id, self.device_id)
+        self.token_mgr = TokenManager(self.session_id, self.device_id)
 
     async def get_balance(self):
         try:
@@ -456,11 +440,8 @@ class JayMiner:
         log(f"Balance: {self.balance:.6f} JAY",C.CYN,"💰")
 
         print()
-        if self.manual_token:
-            log("Using manual browser token mode",C.YEL,"🖐")
-        else:
-            log("Camoufox auto-token mode enabled (browser opens only when a token is needed)",C.YEL,"🌐")
-            self.token_mgr.start()
+        log("Camoufox auto-token mode enabled (browser opens only when a token is needed)",C.YEL,"🌐")
+        self.token_mgr.start()
 
         log("Starting mining...",C.YEL,"⛏")
 
@@ -590,8 +571,6 @@ def main():
     p.add_argument("--wallet","-w",required=True,help="JAY wallet (yjay1...)")
     p.add_argument("--threads","-t",type=int,default=DEFAULT_THREADS,help=f"Threads (default:{DEFAULT_THREADS})")
     p.add_argument("--verbose","-v",action="store_true")
-    p.add_argument("--token",help="Manual websocket token from /api/ws-token (or JAY_MINING_TOKEN in .env; skips Camoufox)")
-    p.add_argument("--auto-token",action="store_true",help="Force Camoufox auto-token mode and ignore manual token env vars; can also be enabled with JAY_AUTO_TOKEN=1")
     p.add_argument("--jay-wallet-browser",action="store_true",help="Send isJayWalletBrowser=true in the pool start_mining payload; can also be enabled with JAY_WALLET_BROWSER=1")
     p.add_argument("--info","-i",action="store_true",help="Show info and exit")
     p.add_argument("--version",action="version",version=f"JAY Network CLI Miner {VERSION}")
@@ -600,14 +579,11 @@ def main():
     if not args.wallet.startswith("yjay"):
         print(f"{C.RED}Invalid wallet address{C.R}"); sys.exit(1)
 
-    auto_token = args.auto_token or parse_env_bool("JAY_AUTO_TOKEN")
-    manual_token = "" if auto_token else resolve_manual_token(args.token)
     jay_wallet_browser = args.jay_wallet_browser or parse_env_bool("JAY_WALLET_BROWSER")
     miner = JayMiner(
         args.wallet,
         max(1,min(args.threads,32)),
         args.verbose,
-        token=manual_token,
         jay_wallet_browser=jay_wallet_browser,
     )
 
