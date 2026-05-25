@@ -15,3 +15,7 @@ logs/
 # Virtual environments
 .venv/
 venv/
+
+# Private game solver extension
+jay-solver-extension/
+jay-solver-extension.zip

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-JAY Network CLI Miner v2
+JAY Network CLI Miner v3
 ========================
-CLI mining client for The Jay Network with full-auto Camoufox token management.
+CLI mining client for The Jay Network with lightweight HTTP token management.
 
 Usage:
     python3 jay-miner.py --wallet yjay1abc...xyz
@@ -45,7 +45,7 @@ POOL_WS_URL   = "wss://api-pool.winnode.xyz"
 POOL_API_URL  = "https://api-pool.winnode.xyz"
 CHAIN_API_URL = "https://api-jayn.winnode.xyz"
 MINING_URL    = "https://mining.thejaynetwork.com"
-VERSION       = "1.5.0"
+VERSION       = "3.0.0"
 
 DEFAULT_THREADS  = 4
 SHARE_INTERVAL   = 5.0    # seconds between share submissions (pool min=750ms, use generous gap)
@@ -164,7 +164,7 @@ def banner():
 # Full-auto Token Manager (Camoufox)
 # ═══════════════════════════════════════════
 class TokenManager:
-    """Opens Camoufox when a fresh browser token is needed, then closes it."""
+    """Fetches WS tokens from the mining API via HTTP (no browser needed since v3)."""
 
     def __init__(self, session_id=None, device_id=None):
         self.session_id = session_id or gen_id("session_")
@@ -174,70 +174,16 @@ class TokenManager:
         self._rate_limited_until = 0
         self._last_token_at = 0
         self._consecutive_429 = 0
-        self._display = ':99'
-        self._xvfb = None
-        self._ensure_xvfb()
-
-    def _ensure_xvfb(self):
-        try:
-            probe = subprocess.run(
-                ['xdpyinfo', '-display', self._display],
-                capture_output=True,
-                timeout=2,
-            )
-            if probe.returncode == 0:
-                return
-        except Exception:
-            pass
-
-        self._xvfb = subprocess.Popen(
-            ['Xvfb', self._display, '-screen', '0', '1920x1080x24'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(1)
 
     def start(self):
-        """Token fetch is lazy/on-demand; no persistent browser is started here."""
+        """Token fetch is lazy/on-demand; nothing to start."""
         return None
 
-    def _fetch_token_from_page(self, page):
-        self._token_generation += 1
-        return page.evaluate('''async ({sessionId, deviceId, tokenGeneration}) => {
-            const ua = navigator.userAgent;
-            const screenInfo = `${screen.width}x${screen.height}x${screen.colorDepth}`;
-            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-            const language = navigator.language || "en-US";
-            const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-            const fingerprint = btoa([ua, screenInfo, tz, language].join("|")).slice(0, 64);
-            const r = await fetch("/api/ws-token", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "X-Client-Fingerprint": fingerprint,
-                    "X-Token-Generation": String(tokenGeneration),
-                    "X-Request-ID": requestId,
-                    "X-Session-ID": sessionId,
-                    "X-Device-ID": deviceId,
-                    "X-Client-UA": btoa(ua).slice(0, 32),
-                    "X-Client-Screen": btoa(screenInfo).slice(0, 16),
-                    "X-Client-TZ": btoa(tz).slice(0, 16),
-                },
-            });
-            const retryAfter = parseInt(r.headers.get("Retry-After") || "0", 10);
-            if (!r.ok) {
-                const text = await r.text().catch(() => "");
-                return {error: true, status: r.status, retryAfter, body: text.slice(0, 240)};
-            }
-            return await r.json();
-        }''', {
-            "sessionId": self.session_id,
-            "deviceId": self.device_id,
-            "tokenGeneration": self._token_generation,
-        })
-
     def get_token(self, timeout=180):
-        """Fetch a fresh token by running Camoufox in a separate subprocess."""
+        """Fetch a fresh token via HTTP POST to /api/ws-token.
+
+        v3: No Camoufox/browser needed — just proper browser-like headers.
+        """
         deadline = time.time() + timeout
 
         while not self._stop:
@@ -249,13 +195,13 @@ class TokenManager:
             if time.time() >= deadline:
                 break
 
-            log("Fetching token via subprocess (Camoufox)...", C.YEL, "🌐")
+            self._token_generation += 1
+            log("Fetching token via HTTP...", C.YEL, "🌐")
             try:
                 result = subprocess.run(
                     [sys.executable, os.path.join(SCRIPT_DIR, "fetch_token.py"),
                      self.session_id, self.device_id],
-                    capture_output=True, text=True, timeout=120,
-                    env={**os.environ, "DISPLAY": self._display},
+                    capture_output=True, text=True, timeout=30,
                 )
                 if result.returncode != 0:
                     err = (result.stderr or result.stdout or "").strip()[-200:]
@@ -265,37 +211,35 @@ class TokenManager:
                 data = json.loads(raw)
 
                 if data.get("error"):
-                    status = data.get("status")
-                    if status == 429:
+                    err_msg = data.get("error", "")
+                    if "429" in str(err_msg) or "rate" in err_msg.lower():
                         wait_for = TOKEN_429_BACKOFF
                         self._rate_limited_until = time.time() + wait_for
-                        log(f"Token endpoint rate-limited (HTTP 429). Backing off {format_wait(wait_for)}.", C.YEL, "⏳")
+                        log(f"Token endpoint rate-limited. Backing off {format_wait(wait_for)}.", C.YEL, "⏳")
                         continue
-                    raise Exception(f"HTTP {status}: {data.get('body','')}")
+                    raise Exception(f"Token error: {err_msg}")
 
                 token = data.get("token")
                 if token:
                     self._rate_limited_until = 0
                     self._last_token_at = time.time()
-                    log(f"Token refreshed via subprocess (session={short_id(self.session_id)})", C.GRN, "🔓")
+                    log(f"Token refreshed (session={short_id(self.session_id)})", C.GRN, "🔓")
                     return token
                 raise Exception(f"No token in response: {raw[:200]}")
 
             except subprocess.TimeoutExpired:
-                log("Token fetch subprocess timed out (120s); retrying...", C.RED, "⚠")
-                time.sleep(10)
+                log("Token fetch timed out (30s); retrying...", C.RED, "⚠")
+                time.sleep(5)
             except Exception as e:
                 if time.time() >= deadline:
                     raise
                 log(f"Token fetch error: {e}; retrying...", C.RED, "⚠")
-                time.sleep(10)
+                time.sleep(5)
 
         raise Exception("Token timeout - no token available")
 
     def stop(self):
         self._stop = True
-        if self._xvfb:
-            self._xvfb.terminate()
 # ═══════════════════════════════════════════
 # Miner
 # ═══════════════════════════════════════════

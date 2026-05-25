@@ -1,83 +1,98 @@
 #!/usr/bin/env python3
-"""Standalone token fetcher - runs Camoufox in isolation (no asyncio conflicts)."""
+"""
+Token fetcher for JAY Mining Pool.
+
+v3: No Camoufox needed! Just HTTP POST with proper browser-like headers.
+The /api/ws-token endpoint requires Origin, Referer, User-Agent, and Sec-Fetch-* headers.
+NO request body — just headers.
+"""
 import sys
-import os
 import json
 import time
 import random
 import string
 import base64
+import urllib.request
+import urllib.error
 
 MINING_URL = "https://mining.thejaynetwork.com"
+TOKEN_ENDPOINT = f"{MINING_URL}/api/ws-token"
+
+
+def gen_id(prefix=""):
+    return f"{prefix}{int(time.time()*1000)}_{''.join(random.choices(string.ascii_lowercase + string.digits, k=12))}"
+
+
+def gen_fingerprint(ua, screen_info, tz, language):
+    raw = f"{ua}|{screen_info}|{tz}|{language}"
+    return base64.b64encode(raw.encode()).decode()[:64]
+
+
+def fetch_token(session_id=None, device_id=None):
+    """Fetch a WS token from the mining API using proper browser-like headers.
+
+    Returns dict with 'token', 'wsUrl', 'expiresIn' on success.
+    Returns dict with 'error' on failure.
+    """
+    if not session_id:
+        session_id = gen_id("session_")
+    if not device_id:
+        device_id = gen_id("device_")
+
+    ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    screen_info = "1920x1080x24"
+    tz = "Asia/Jakarta"
+    language = "en-US"
+    fingerprint = gen_fingerprint(ua, screen_info, tz, language)
+    request_id = f"req_{int(time.time()*1000)}_{''.join(random.choices(string.ascii_lowercase + string.digits, k=8))}"
+
+    headers = {
+        "Content-Type": "application/json",
+        "Origin": MINING_URL,
+        "Referer": f"{MINING_URL}/",
+        "User-Agent": ua,
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "X-Client-Fingerprint": fingerprint,
+        "X-Token-Generation": "1",
+        "X-Request-ID": request_id,
+        "X-Session-ID": session_id,
+        "X-Device-ID": device_id,
+        "X-Client-UA": base64.b64encode(ua.encode()).decode()[:32],
+        "X-Client-Screen": base64.b64encode(screen_info.encode()).decode()[:16],
+        "X-Client-TZ": base64.b64encode(tz.encode()).decode()[:16],
+    }
+
+    req = urllib.request.Request(TOKEN_ENDPOINT, method="POST", headers=headers)
+    # IMPORTANT: no body! The server rejects requests with a body.
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+            if "token" in data:
+                return data
+            return {"error": f"Unexpected response: {data}"}
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()[:300]
+        return {"error": f"HTTP {e.code}: {body}"}
+    except Exception as e:
+        return {"error": str(e)}
+
 
 def main():
-    session_id = sys.argv[1] if len(sys.argv) > 1 else f"session_{int(time.time()*1000)}_{''.join(random.choices(string.ascii_lowercase+string.digits,k=12))}"
-    device_id = sys.argv[2] if len(sys.argv) > 2 else f"device_{int(time.time()*1000)}_{''.join(random.choices(string.ascii_lowercase+string.digits,k=12))}"
+    """CLI entry point. Prints JSON result to stdout."""
+    session_id = sys.argv[1] if len(sys.argv) > 1 else None
+    device_id = sys.argv[2] if len(sys.argv) > 2 else None
 
-    # Ensure Xvfb
-    display = ":99"
-    os.environ["DISPLAY"] = display
-    try:
-        r = os.popen(f"xdpyinfo -display {display} 2>/dev/null").read()
-        if "name of display" not in r:
-            os.system(f"Xvfb {display} -screen 0 1920x1024x24 &")
-            time.sleep(1)
-    except:
-        pass
+    result = fetch_token(session_id, device_id)
+    print(json.dumps(result))
 
-    from camoufox.sync_api import Camoufox
+    if "error" in result:
+        sys.exit(1)
 
-    with Camoufox(headless=False, humanize=True, geoip=False) as browser:
-        page = browser.new_page()
-        page.goto(MINING_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(25000)
-        title = page.title()
-        if "JAY Mining" not in title:
-            page.wait_for_timeout(15000)
-            title = page.title()
-        if "JAY Mining" not in title:
-            print(json.dumps({"error": True, "msg": f"Bad title: {title!r}"}))
-            sys.exit(1)
-
-        result = page.evaluate('''({sessionId, deviceId}) => {
-            const ua = navigator.userAgent;
-            const screenInfo = `${screen.width}x${screen.height}x${screen.colorDepth}`;
-            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-            const language = navigator.language || "en-US";
-            const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-            const fingerprint = btoa([ua, screenInfo, tz, language].join("|")).slice(0, 64);
-            // These must be returned for the caller to use with fetch
-            return {
-                ua, screenInfo, tz, language, requestId, fingerprint,
-                sessionId, deviceId
-            };
-        }''', {"sessionId": session_id, "deviceId": device_id})
-
-        # Now do the fetch with all required headers
-        result = page.evaluate('''async (params) => {
-            const {ua, screenInfo, tz, language, requestId, fingerprint, sessionId, deviceId} = params;
-            const r = await fetch("/api/ws-token", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "X-Client-Fingerprint": fingerprint,
-                    "X-Token-Generation": "1",
-                    "X-Request-ID": requestId,
-                    "X-Session-ID": sessionId,
-                    "X-Device-ID": deviceId,
-                    "X-Client-UA": btoa(ua).slice(0, 32),
-                    "X-Client-Screen": btoa(screenInfo).slice(0, 16),
-                    "X-Client-TZ": btoa(tz).slice(0, 16),
-                },
-            });
-            if (!r.ok) {
-                const text = await r.text().catch(() => "");
-                return {error: true, status: r.status, body: text.slice(0, 240)};
-            }
-            return await r.json();
-        }''', result)
-
-        print(json.dumps(result))
 
 if __name__ == "__main__":
     main()
