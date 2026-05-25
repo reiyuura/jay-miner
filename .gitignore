@@ -16,6 +16,7 @@ logs/
 .venv/
 venv/
 
-# Private game solver extension
-jay-solver-extension/
-jay-solver-extension.zip
+
+# Private game scripts (not for GitHub)
+jay-games-auto.py
+jay-games-farm.py
